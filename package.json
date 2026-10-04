@@ -1,0 +1,77 @@
+{
+  "name": "hywmusic-desktop",
+  "productName": "HYWmusic",
+  "version": "1.0.0-beta1",
+  "description": "HYWmusic 何意味音乐 · 智能音源聚合服务桌面客户端",
+  "main": "main.js",
+  "author": "BennerRock",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-packager . HYWmusic --platform=win32 --arch=x64 --out=\"../HYWmusic-Release\" --icon=build/icon.ico --asar --app-version=1.0.0-beta1 --ignore=\"\\.npmrc\" --ignore=\"release\" --ignore=\"dist\" --ignore=\"node_modules/(?!electron)\"",
+    "dist": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.hywmusic.desktop",
+    "productName": "HYWmusic",
+    "copyright": "Copyright © 2026 BennerRock",
+    "directories": {
+      "output": "../HYWmusic-v1.0.0-beta1",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "src/**/*",
+      "build/icon.ico",
+      "LICENSE",
+      "README.md"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "HYWmusic",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "language": "2052",
+      "artifactName": "HYWmusic-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "HYWmusic-Portable-${version}.${ext}",
+      "unpackDirName": "HYWmusic",
+      "requestExecutionLevel": "user"
+    },
+    "compression": "maximum",
+    "asar": true
+  },
+  "devDependencies": {
+    "@electron/packager": "^18.3.6",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.15.3"
+  }
+}

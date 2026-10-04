@@ -1,0 +1,147 @@
+/* ============================================================
+   HYWmusic 播放器 · 设计令牌
+   ============================================================ */
+
+:root {
+  --radius: 10px;
+  --sidebar-w: 208px;
+  --pbar-h: 78px;
+
+  /* 原生窗口控件（最小化/最大化/关闭）安全区。
+     Electron titleBarOverlay 在 100% 缩放下的控件幅宽为 3 × 46px = 138px，
+     高度与 titleBarOverlay.height 保持一致（40px）。
+     顶栏所有内容都必须避让该区域，避免被系统按钮遮挡。 */
+  --wctrl-w: 138px;
+  --wctrl-h: 40px;
+
+  --font: 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* ---------------- 深色（默认） ---------------- */
+[data-theme='dark'] {
+  --bg: 228 14% 9%;
+  --bg-elev: 228 13% 12%;
+  --card: 228 12% 14%;
+  --card-hover: 228 12% 17%;
+  --border: 228 12% 22%;
+  --fg: 220 20% 96%;
+  --muted: 222 12% 62%;
+  --muted-2: 222 10% 46%;
+  --primary: 245 82% 66%;
+  --primary-fg: 0 0% 100%;
+  --primary-soft: 245 82% 66% / 0.14;
+  --success: 152 62% 46%;
+  --warn: 38 92% 56%;
+  --danger: 356 76% 60%;
+  --scroll: 228 12% 26%;
+  --shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7);
+}
+
+/* ---------------- 浅色 ---------------- */
+[data-theme='light'] {
+  --bg: 220 24% 97%;
+  --bg-elev: 0 0% 100%;
+  --card: 0 0% 100%;
+  --card-hover: 220 24% 96%;
+  --border: 220 16% 88%;
+  --fg: 226 24% 16%;
+  --muted: 222 12% 44%;
+  --muted-2: 222 10% 58%;
+  --primary: 245 72% 58%;
+  --primary-fg: 0 0% 100%;
+  --primary-soft: 245 72% 58% / 0.1;
+  --success: 152 58% 38%;
+  --warn: 32 88% 46%;
+  --danger: 356 70% 52%;
+  --scroll: 220 14% 80%;
+  --shadow: 0 12px 32px -14px rgba(20, 28, 50, 0.22);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 13.5px;
+  color: hsl(var(--fg));
+  background: hsl(var(--bg));
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; padding: 0; }
+a { color: inherit; text-decoration: none; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--scroll));
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-2)); background-clip: content-box; }
+
+/* 启动动画 */
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: hsl(var(--bg));
+  transition: opacity .45s ease;
+}
+.boot.hide { opacity: 0; pointer-events: none; }
+.boot__logo img { width: 82px; height: 82px; border-radius: 20px; animation: bootPulse 1.6s ease-in-out infinite; }
+.boot__name { font-size: 17px; font-weight: 700; letter-spacing: .12em; color: hsl(var(--fg)); }
+.boot__bar { width: 132px; height: 3px; border-radius: 3px; background: hsl(var(--border)); overflow: hidden; }
+.boot__bar i { display: block; width: 40%; height: 100%; border-radius: 3px; background: hsl(var(--primary)); animation: bootSlide 1.1s ease-in-out infinite; }
+
+@keyframes bootPulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(.94); opacity: .75; } }
+@keyframes bootSlide { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
+
+/* 轻提示 */
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--pbar-h) + 22px);
+  transform: translateX(-50%);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  pointer-events: none;
+}
+.toast {
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  max-width: 520px;
+  animation: toastIn .22s ease;
+  transition: opacity .3s ease, transform .3s ease;
+}
+.toast.out { opacity: 0; transform: translateY(6px); }
+.toast--ok { border-color: hsl(var(--success) / .5); color: hsl(var(--success)); }
+.toast--err { border-color: hsl(var(--danger) / .5); color: hsl(var(--danger)); }
+@keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* 后台（托盘）时暂停动画，降低占用 */
+.is-hidden .boot__logo img,
+.is-hidden .boot__bar i,
+.is-hidden .spin,
+.is-hidden .bars i { animation-play-state: paused !important; }
+.is-hidden * { transition: none !important; }
