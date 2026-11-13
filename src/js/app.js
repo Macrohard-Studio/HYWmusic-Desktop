@@ -39,7 +39,7 @@
     showVolume: false,
     detailOpen: false,
     selected: new Set(),
-    version: '1.0.0-beta1',
+    version: '1.0.0-beta2',
     baseUrl: '',
     // 只保留展示别名，渲染进程内不落地真实服务端地址
     serverLabel: '',
@@ -48,6 +48,8 @@
     baseLabel: '',
     qMenuOpen: false,
     sMenuOpen: false,
+    cardKey: { active: false },
+    admin: { loggedIn: false, user: null },
   };
 
   let closePrefs = { action: 'tray', askDisabled: false };
@@ -302,7 +304,7 @@
 
           <div class="drop" id="sdrop">
             <button class="pick pick--btn" data-act="server-menu" title="服务端地址">
-              <span>${icon('server', 13)}服务器</span>
+              <span>服务器</span>
               <b class="pick__val">${esc(serverLabel())}</b>
               ${icon('chevronDown', 14)}
             </button>
@@ -565,6 +567,9 @@
       ['download', '下载设置', 'download'],
       ['keys', '快捷键', 'zap'],
       ['theme', '主题', 'sun'],
+      ['cardkey', '卡密登录', 'key'],
+      ['admin', '管理员登录', 'shield'],
+      ['perms', '权限说明', 'lock'],
       ['tray', '托盘与关闭', 'panel'],
       ['about', '关于', 'info'],
     ];
@@ -741,6 +746,88 @@
           </div>
         </div>`;
     }
+    if (cat === 'cardkey') {
+      const k = S.cardKey || { active: false };
+      return `
+        <div class="card">
+          <div class="card__title">卡密登录</div>
+          <p class="note">填入赞助 / VIP 卡密，解锁对应音质音乐（各页面通用，无需重复填写）。卡密只保存在本机，不会上传到别处。</p>
+          ${k.active ? `
+            <div class="authstatus authstatus--ok">
+              <div class="authstatus__ic">${icon('check', 20)}</div>
+              <div class="authstatus__tx">
+                <b>${k.tier === 'vip' ? 'VIP 卡密' : '普通卡密'} · 已激活</b>
+                <span>卡密 ${esc(k.masked || '')}</span>
+                ${k.expireAt ? `<span>有效期至 ${esc(String(k.expireAt).slice(0, 10))}</span>` : ''}
+                ${k.releaseName ? `<span>关联发行版：${esc(k.releaseName)}</span>` : ''}
+              </div>
+              <button class="btn btn-sm btn-ghost" data-act="cardkey-clear">退出卡密</button>
+            </div>`
+          : `
+            <div class="field">
+              <label>卡密</label>
+              <input id="cardkey-input" type="password" placeholder="输入卡密" autocomplete="off" spellcheck="false"/>
+              <button class="btn btn-sm" data-act="cardkey-verify">验证并激活</button>
+            </div>
+            <div class="authstatus authstatus--off">
+              <div class="authstatus__ic">${icon('key', 20)}</div>
+              <div class="authstatus__tx"><b>未激活</b><span>当前以免费权限使用</span></div>
+            </div>`}
+        </div>`;
+    }
+
+    if (cat === 'admin') {
+      const a = S.admin || { loggedIn: false };
+      return `
+        <div class="card">
+          <div class="card__title">管理员登录</div>
+          <p class="note">管理员会话用于解锁服务端管理类接口（歌单解析、配置读取等）。登录状态保存在本机会话中，退出后即失效。</p>
+          ${a.loggedIn ? `
+            <div class="authstatus authstatus--ok">
+              <div class="authstatus__ic">${icon('user', 20)}</div>
+              <div class="authstatus__tx">
+                <b>${esc(a.user && a.user.name ? a.user.name : '已登录')}</b>
+                <span>角色：${esc((a.user && a.user.role) || '—')}</span>
+                <span>权限项：${(a.user && a.user.permissions ? a.user.permissions.length : 0)} 项</span>
+              </div>
+              <button class="btn btn-sm btn-ghost" data-act="admin-logout">退出登录</button>
+            </div>`
+          : `
+            <div class="field"><label>账号</label><input id="admin-user" type="text" placeholder="管理员账号" autocomplete="username" spellcheck="false"/></div>
+            <div class="field"><label>密码</label><input id="admin-pass" type="password" placeholder="密码" autocomplete="current-password"/></div>
+            <div class="field"><label></label><button class="btn btn-sm" data-act="admin-login">登录</button></div>
+            <div class="authstatus authstatus--off">
+              <div class="authstatus__ic">${icon('shield', 20)}</div>
+              <div class="authstatus__tx"><b>未登录</b><span>管理类功能当前不可用</span></div>
+            </div>`}
+        </div>`;
+    }
+
+    if (cat === 'perms') {
+      const rows = [
+        ['搜索歌曲 / 歌手 / 专辑', 'free', '免费', 'ok'],
+        ['LRC 歌词（含翻译）', 'free', '免费', 'ok'],
+        ['标准 / 高品音质（128k、320k）', 'free', '免费', 'ok'],
+        ['公告 / 公开统计', 'free', '免费', 'ok'],
+        ['无损 / Hi-Res / 超清 / 母带', 'key', '卡密或管理员', 'warn'],
+        ['歌单解析 / 导入外部歌单', 'admin', '管理员', 'warn'],
+        ['服务端配置读取', 'admin', '管理员', 'warn'],
+        ['后台管理（用户 / 日志 / 卡密 / 发行版 / 音源）', 'admin', '管理员', 'warn'],
+      ];
+      return `
+        <div class="card">
+          <div class="card__title">权限说明（实测）</div>
+          <p class="note">以下结论来自对当前服务端的实际请求测试。免费项无需任何凭据；标「卡密」的项需先在「卡密登录」激活；标「管理员」的项需先在「管理员登录」登录。</p>
+          <div class="permhead"><span>功能</span><span>所需权限</span></div>
+          ${rows.map(([name, tag, label, tone]) => `
+            <div class="permrow">
+              <span>${esc(name)}</span>
+              <em class="perm perm--${tone}">${icon(tag === 'free' ? 'check' : tag === 'key' ? 'key' : 'shield', 12)}${esc(label)}</em>
+            </div>`).join('')}
+          <p class="note note--sub">说明：部分高档音质即使有权限，也可能因上游音源不提供而自动回落到可用档位，属正常现象。</p>
+        </div>`;
+    }
+
     if (cat === 'tray') {
       return `
         <div class="card">
@@ -1312,6 +1399,38 @@
     if (act === 'prev') { P.prev(); return; }
     if (act === 'mute') { P.toggleMute(); syncVolumeUI(); renderPlayerBar(); return; }
 
+    if (act === 'cardkey-verify') {
+      const el = $('#cardkey-input');
+      const r = await API.cardKeyVerify(el ? el.value : '');
+      if (r && r.ok) { S.cardKey = { active: true, masked: (r.info.key || '').slice(0, 3) + '****' + (r.info.key || '').slice(-3), tier: r.info.tier, expireAt: r.info.expireAt, releaseName: r.info.releaseName }; toast('卡密已激活', 'ok'); }
+      else toast((r && r.error) || '验证失败', 'err');
+      renderContent();
+      return;
+    }
+    if (act === 'cardkey-clear') {
+      await API.cardKeyClear();
+      S.cardKey = { active: false };
+      toast('已退出卡密', 'ok');
+      renderContent();
+      return;
+    }
+    if (act === 'admin-login') {
+      const u = $('#admin-user'), pw = $('#admin-pass');
+      toast('正在登录…');
+      const r = await API.adminLogin(u ? u.value : '', pw ? pw.value : '');
+      if (r && r.ok) { S.admin = { loggedIn: true, user: r.user }; toast('登录成功：' + r.user.name, 'ok'); }
+      else toast((r && r.error) || '登录失败', 'err');
+      renderContent();
+      return;
+    }
+    if (act === 'admin-logout') {
+      await API.adminLogout();
+      S.admin = { loggedIn: false, user: null };
+      toast('已退出登录', 'ok');
+      renderContent();
+      return;
+    }
+
     if (act === 'volume-panel') {
       S.showVolume = !S.showVolume;
       const old = $('#vpanel');
@@ -1667,6 +1786,11 @@
       // 主进程已比对过本地配置，直接告知当前命中哪个预设（-1 = 自定义地址）
       S.serverIdx = typeof srv.index === 'number' ? srv.index : 0;
     }
+
+    // 恢复上次的登录状态
+    S.cardKey = (await API.cardKeyStatus().catch(() => null)) || { active: false };
+    const as = await API.adminSession().catch(() => null);
+    S.admin = as && as.loggedIn ? { loggedIn: true, user: as.user } : { loggedIn: false, user: null };
 
     applyTheme(S.themePref);
     hookPlayer();

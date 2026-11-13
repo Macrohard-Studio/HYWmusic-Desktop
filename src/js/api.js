@@ -112,6 +112,13 @@
     getServer: () => bridge.getServer(),
     setServer: (u) => bridge.setServer(u),
     testServer: (u) => bridge.testServer(u),
+
+    cardKeyVerify: (k) => bridge.cardKeyVerify(k),
+    cardKeyClear: () => bridge.cardKeyClear(),
+    cardKeyStatus: () => bridge.cardKeyStatus(),
+    adminLogin: (u, p) => bridge.adminLogin(u, p),
+    adminSession: () => bridge.adminSession(),
+    adminLogout: () => bridge.adminLogout(),
     closePrefs: () => bridge.closePrefs(),
     setClosePrefs: (a, d) => bridge.setClosePrefs(a, d),
     minimizeToTray: () => bridge.minimizeToTray(),

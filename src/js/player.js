@@ -19,6 +19,7 @@
     deviceId: '',
     rate: 1,
     preservesPitch: true,
+    recoverTries: 0,   // 当前歌曲因链接失效自动重取链的次数
   };
 
   const listeners = new Map();
@@ -138,6 +139,7 @@
   function sameSong(a) {
     return (b) => b && a && b.songId === a.songId && b.platform === a.platform;
   }
+  function songKeyOf(s) { return s ? `${s.platform}:${s.songId}` : ''; }
 
   /* ---------------- 取链 + 播放 ---------------- */
 
@@ -157,6 +159,8 @@
 
   async function load(song) {
     if (!song) return;
+    // 同一首歌的重试不重置计数，换歌才重置
+    if (!state.current || songKeyOf(song) !== songKeyOf(state.current)) state.recoverTries = 0;
     state.current = song;
     state.error = '';
     state.loading = true;
@@ -183,8 +187,8 @@
         singer: song.singer,
       });
       if (res && res.ok) break;
-      // 卡密 / 平台权限问题，换音质也解决不了，直接跳出
-      if (res && (res.needCardKey || res.forbidden)) break;
+      // 权限类问题，换音质也解决不了，直接跳出
+      if (res && (res.permissionDenied || res.forbidden)) break;
     }
 
     // 平台/音质受限或失败时，自动换源重试一次
@@ -200,7 +204,7 @@
             singer: alt.singer,
           });
           if (res && res.ok) break;
-          if (res && (res.needCardKey || res.forbidden)) break;
+          if (res && (res.permissionDenied || res.forbidden)) break;
         }
         if (res && res.ok) {
           song = { ...alt };
@@ -356,9 +360,29 @@
   audio.addEventListener('waiting', () => emit('buffering', true));
   audio.addEventListener('playing', () => emit('buffering', false));
   audio.addEventListener('ended', () => next(true));
+  /*
+   * 上游音源给的 CDN 链接偶发失效（防盗链 / 过期），表现为 MEDIA_ERR_SRC_NOT_SUPPORTED。
+   * 原来只弹提示就卡住；现在自动重取链一次，仍失败则跳下一首，保证播放不中断。
+   */
   audio.addEventListener('error', () => {
-    if (!audio.src) return;
-    emit('error', '音频加载失败，可能链接已失效');
+    if (!audio.src || !state.current) return;
+    if (state.recoverTries < 1) {
+      state.recoverTries += 1;
+      emit('notice', { type: '', text: '链接失效，正在重新获取…' });
+      const song = state.current;
+      const t = audio.currentTime;
+      setTimeout(() => {
+        load(song).then(() => { try { if (t > 1) audio.currentTime = t; } catch (_) {} }).catch(() => {});
+      }, 300);
+      return;
+    }
+    state.recoverTries = 0;
+    if (state.queue.length > 1) {
+      emit('notice', { type: 'err', text: '该歌曲无法播放，已自动切到下一首' });
+      setTimeout(() => next(false), 200);
+    } else {
+      emit('error', '音频加载失败，可能链接已失效');
+    }
   });
 
   window.Player = {

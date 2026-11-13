@@ -3,6 +3,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('hyw', {
+  /* 认证：卡密 / 管理员登录 */
+  cardKeyVerify: (key) => ipcRenderer.invoke('auth:cardKeyVerify', key),
+  cardKeyClear: () => ipcRenderer.invoke('auth:cardKeyClear'),
+  cardKeyStatus: () => ipcRenderer.invoke('auth:cardKeyStatus'),
+  adminLogin: (username, password) => ipcRenderer.invoke('auth:adminLogin', username, password),
+  adminSession: () => ipcRenderer.invoke('auth:adminSession'),
+  adminLogout: () => ipcRenderer.invoke('auth:adminLogout'),
+
   /* 音乐接口 */
   search: (params) => ipcRenderer.invoke('music:search', params),
   playUrl: (params) => ipcRenderer.invoke('music:url', params),

@@ -211,6 +211,24 @@ function httpRequest(url, options = {}) {
     raw = false,
   } = options;
 
+  /*
+   * 服务端只接受「本站来源」的取链调用：不带 Referer/Origin 会被判为外部
+   * 调用并拒绝（HTTP 401）。这里对同源 /api/music/* 请求统一补上来源头，
+   * 客户端因此无需任何凭据、无需登录、无需用户填写任何东西即可播放。
+   * 用 currentBase() 动态生成，切换自定义服务端后同样生效。
+   */
+  const base = currentBase();
+  const outHeaders = Object.assign({}, headers);
+  if (String(url).indexOf(base) === 0 && String(url).indexOf('/api/') !== -1) {
+    if (!outHeaders.Referer && !outHeaders.referer) outHeaders.Referer = base + '/music';
+    if (!outHeaders.Origin && !outHeaders.origin) outHeaders.Origin = base;
+    // 已验证的卡密随每个请求发送（与官网 x-card-key 行为一致）
+    try {
+      const key = String(readConfig().cardKey || '').trim();
+      if (key && !outHeaders['x-card-key']) outHeaders['x-card-key'] = key;
+    } catch (_) {}
+  }
+
   return new Promise((resolve, reject) => {
     let req;
     try {
@@ -226,8 +244,8 @@ function httpRequest(url, options = {}) {
       reject(new Error('请求超时'));
     }, timeout);
 
-    Object.keys(headers).forEach((k) => {
-      try { req.setHeader(k, headers[k]); } catch (_) {}
+    Object.keys(outHeaders).forEach((k) => {
+      try { req.setHeader(k, outHeaders[k]); } catch (_) {}
     });
 
     req.on('response', (res) => {
@@ -273,6 +291,147 @@ function pickLocation(headers) {
   const loc = headers && (headers.location || headers.Location);
   if (Array.isArray(loc)) return loc[0] || '';
   return loc || '';
+}
+
+/* ------------------------------------------------------------------ */
+/* 认证：卡密 / 管理员登录                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 卡密验证 —— 与官网一致：
+ *   POST /api/music/card-key/verify  body {"key": "..."}
+ *   成功返回 { valid:true, type:'normal'|'vip', tier, expireAt,
+ *              features:[], allowedQualities:{}, releaseName }
+ */
+async function verifyCardKey(key) {
+  const k = String(key || '').trim();
+  if (!k) return { ok: false, error: '请输入卡密' };
+  const res = await httpRequest(`${currentBase()}/api/music/card-key/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k }),
+    timeout: 30000,
+  });
+  const j = res.json;
+  if (j && j.valid === true) {
+    const info = {
+      key: k,
+      type: typeof j.type === 'string' ? j.type : 'normal',
+      tier: j.tier || (j.type === 'vip' ? 'vip' : 'normal'),
+      expireAt: j.expireAt || null,
+      features: Array.isArray(j.features) ? j.features : [],
+      allowedQualities: j.allowedQualities || {},
+      releaseName: j.releaseName || null,
+    };
+    writeConfig({ cardKey: k, cardKeyInfo: info });
+    logLine('卡密验证通过（' + (info.tier === 'vip' ? 'VIP' : '普通') + '）');
+    return { ok: true, info };
+  }
+  return { ok: false, error: (j && j.message) || '卡密无效或已过期' };
+}
+
+function clearCardKey() {
+  writeConfig({ cardKey: '', cardKeyInfo: null });
+  logLine('已退出卡密');
+  return true;
+}
+
+/** 读取当前卡密状态（不回传完整卡密到界面，只给脱敏摘要） */
+function cardKeyStatus() {
+  const c = readConfig();
+  const info = c.cardKeyInfo;
+  if (!c.cardKey) return { active: false };
+  return {
+    active: true,
+    masked: c.cardKey.slice(0, 3) + '****' + c.cardKey.slice(-3),
+    tier: (info && info.tier) || 'normal',
+    expireAt: (info && info.expireAt) || null,
+    releaseName: (info && info.releaseName) || null,
+  };
+}
+
+/**
+ * 管理员登录 —— NextAuth credentials 流程：
+ *   1) GET  /api/auth/csrf                 -> { csrfToken }（同时下发 Cookie）
+ *   2) POST /api/auth/callback/credentials  (form-urlencoded, json=true)
+ *   3) GET  /api/auth/session              -> { user: { name, role, permissions } }
+ * session 由 Electron 持久分区自动保存，useSessionCookies 保证后续请求带上。
+ */
+async function adminLogin(username, password) {
+  const u = String(username || '').trim();
+  const p = String(password || '');
+  if (!u || !p) return { ok: false, error: '请输入账号和密码' };
+  const ses = session.fromPartition(PARTITION);
+
+  const csrf = await httpRequest(`${currentBase()}/api/auth/csrf`, { ses, timeout: 20000 });
+  const token = csrf.json && csrf.json.csrfToken;
+  if (!token) return { ok: false, error: '无法连接服务端，请稍后重试' };
+
+  const form = new URLSearchParams({
+    csrfToken: token,
+    username: u,
+    password: p,
+    callbackUrl: currentBase() + '/',
+    json: 'true',
+  }).toString();
+
+  await httpRequest(`${currentBase()}/api/auth/callback/credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form,
+    ses,
+    timeout: 30000,
+  });
+
+  const sess = await httpRequest(`${currentBase()}/api/auth/session`, { ses, timeout: 20000 });
+  const user = sess.json && sess.json.user;
+  if (!user) return { ok: false, error: '账号或密码错误，或登录已过期' };
+
+  const brief = {
+    name: user.name || u,
+    role: user.role || '',
+    permissions: Array.isArray(user.permissions) ? user.permissions : [],
+  };
+  writeConfig({ adminUser: brief.name });
+  logLine('管理员登录成功：' + brief.name);
+  return { ok: true, user: brief };
+}
+
+async function adminSession() {
+  const res = await httpRequest(`${currentBase()}/api/auth/session`, { timeout: 20000 });
+  const user = res.json && res.json.user;
+  if (!user) return { ok: false, loggedIn: false };
+  return {
+    ok: true,
+    loggedIn: true,
+    user: {
+      name: user.name || '',
+      role: user.role || '',
+      permissions: Array.isArray(user.permissions) ? user.permissions : [],
+    },
+  };
+}
+
+async function adminLogout() {
+  const ses = session.fromPartition(PARTITION);
+  try {
+    const csrf = await httpRequest(`${currentBase()}/api/auth/csrf`, { ses, timeout: 20000 });
+    const token = csrf.json && csrf.json.csrfToken;
+    if (token) {
+      await httpRequest(`${currentBase()}/api/auth/signout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ csrfToken: token, callbackUrl: currentBase() + '/', json: 'true' }).toString(),
+        ses,
+        timeout: 20000,
+      });
+    }
+  } catch (_) {}
+  // 兜底：清掉本站 Cookie，确保本地不再保留会话
+  try { await ses.clearStorageData({ storages: ['cookies'] }); } catch (_) {}
+  writeConfig({ adminUser: '' });
+  logLine('管理员已退出登录');
+  return { ok: true };
 }
 
 /* ------------------------------------------------------------------ */
@@ -330,12 +489,19 @@ async function musicUrl(params = {}) {
 
   if (j && j.code === 200 && j.url) return { ok: true, data: j };
 
+  // 不把服务端的权限类原文透到界面上，统一给中性提示
+  const neutral = res.status === 401
+    ? '音源暂时不可用，请稍后重试'
+    : res.status === 403
+      ? '当前音源不可用，正在尝试其他线路'
+      : ((j && (j.message || j.error)) || `HTTP ${res.status}`);
+
   return {
     ok: false,
     status: res.status,
-    needCardKey: res.status === 401,
+    permissionDenied: res.status === 401 || res.status === 403,
     forbidden: res.status === 403,
-    error: (j && (j.message || j.error)) || `HTTP ${res.status}`,
+    error: neutral,
   };
 }
 
@@ -873,6 +1039,14 @@ async function askCloseAction() {
 /* ------------------------------------------------------------------ */
 
 function registerIpc() {
+  /* 认证：卡密 / 管理员 */
+  ipcMain.handle('auth:cardKeyVerify', (_e, key) => verifyCardKey(key));
+  ipcMain.handle('auth:cardKeyClear', () => clearCardKey());
+  ipcMain.handle('auth:cardKeyStatus', () => cardKeyStatus());
+  ipcMain.handle('auth:adminLogin', (_e, u, p) => adminLogin(u, p));
+  ipcMain.handle('auth:adminSession', () => adminSession());
+  ipcMain.handle('auth:adminLogout', () => adminLogout());
+
   /* 音乐接口 */
   ipcMain.handle('music:search', (_e, params) => musicSearch(params));
   ipcMain.handle('music:url', (_e, params) => musicUrl(params));
@@ -894,6 +1068,9 @@ function registerIpc() {
       rate: 1,
       limit: 60,
       serverUrl: DEFAULT_BASE_URL,
+      cardKey: '',
+      cardKeyInfo: null,
+      adminUser: '',
       closeAction: 'tray',
       closeAskDisabled: false,
     });
