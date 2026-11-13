@@ -20,6 +20,7 @@
     rate: 1,
     preservesPitch: true,
     recoverTries: 0,   // 当前歌曲因链接失效自动重取链的次数
+    failStreak: 0,     // 连续取链失败次数（用于自动跳过 + 防死循环）
   };
 
   const listeners = new Map();
@@ -193,7 +194,11 @@
 
     // 平台/音质受限或失败时，自动换源重试一次
     if (!res || !res.ok) {
-      const alt = await findAlternative(song);
+      let alt = null;
+      // 只在本轮第一次失败时尝试换源：连续失败时再花 12 秒换源只会让跳过更慢
+      if (state.failStreak === 0) {
+        try { alt = await findAlternative(song); } catch (_) { alt = null; }
+      }
       if (alt) {
         for (const q of chain) {
           res = await window.API.playUrl({
@@ -220,6 +225,17 @@
       state.error = (res && res.error) || '取链失败';
       emit('loading', false);
       emit('error', state.error);
+
+      // 取链彻底失败（如上游版权限制返回 500）：队列里还有别的歌就自动跳过，
+      // 避免用户卡在某一首上反复点播放。连续失败 5 次则停下，防止无限跳。
+      state.failStreak += 1;
+      if (state.failStreak >= 5) {
+        state.failStreak = 0;
+        emit('notice', { type: 'err', text: '连续多首无法播放，请检查网络或切换音源' });
+      } else if (state.queue.length > 1) {
+        emit('notice', { type: 'err', text: '该歌曲无法获取播放地址，已自动跳过' });
+        setTimeout(() => next(false), 300);
+      }
       return;
     }
 
@@ -240,18 +256,39 @@
     }
 
     state.loading = false;
+    state.failStreak = 0;
     emit('loading', false);
     emit('url', state.urlInfo);
   }
 
   /** 在当前平台之外找一个同名歌曲 */
   async function findAlternative(song) {
-    const others = ['wy', 'tx', 'kg', 'kw', 'mg', 'qs'].filter((p) => p !== song.platform);
+    // 搜索时已把「同名同歌手的其他音源」挂在 __alts 上，直接用最省事
+    if (song && Array.isArray(song.__alts) && song.__alts.length) {
+      const alt = song.__alts[0];
+      if (alt && alt.platform !== song.platform) return alt;
+    }
+    // 总时长上限：换源只是兜底，不能让它把播放流程卡住几分钟
+    const work = findAlternativeInner(song);
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 12000));
+    return Promise.race([work, timeout]);
+  }
+
+  async function findAlternativeInner(song) {
+    // 只试最常用的几个源：全试一遍太慢，换源只是兜底
+    const others = ['wy', 'tx', 'kg'].filter((p) => p !== song.platform);
     const key = String(song.name || '').toLowerCase().replace(/\s+/g, '');
     const singer = String(song.singer || '').toLowerCase().replace(/\s+/g, '');
 
     for (const p of others) {
-      const res = await window.API.search({ keyword: `${song.name} ${song.singer || ''}`.trim(), platform: p, limit: 8 });
+      let res = null;
+      try {
+        // 单平台搜索同样可能超时，必须自己兜住：否则异常会中断整个播放流程，
+        // 表现为「点了没反应、也没有任何提示」
+        res = await window.API.search({ keyword: `${song.name} ${song.singer || ''}`.trim(), platform: p, limit: 8 });
+      } catch (_) {
+        continue;
+      }
       if (!res || !res.ok || !res.data.length) continue;
       const hit = res.data.find(
         (x) => String(x.name || '').toLowerCase().replace(/\s+/g, '') === key &&

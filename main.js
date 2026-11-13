@@ -25,13 +25,86 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
+
+/* ------------------------------------------------------------------ */
+/* 运行数据目录：全部放到 Windows 系统临时目录                          */
+/*   运行数据：C:\Users\<用户名>\AppData\Local\Temp\HYWmusic-Data\      */
+/* ------------------------------------------------------------------ */
+/*
+   单文件便携版的定位是「双击即用、不留痕」。把 userData / sessionData /
+   logs / crashDumps 都指到系统 Temp 下的专用子目录，这样：
+     - 配置、启动日志、会话 Cookie、缓存都集中在一处；
+     - 不在 %APPDATA% 留下长期目录；
+     - 刻意避开 electron-builder portable 的自解压目录
+       （package.json 里 unpackDirName = "HYWmusic"，退出时会清理），
+       数据目录用 "HYWmusic-Data"，两者不同名，配置才不会被连带删除。
+   注意：系统清理 Temp 时这些设置可能被清除（含已激活的卡密 / 登录态），
+   这是「临时数据」语义的预期行为。
+*/
+/* ------------------------------------------------------------------ */
+/* 资源占用优化：关闭本应用用不到的 Chromium 后台服务                    */
+/* ------------------------------------------------------------------ */
+/*
+   只裁剪「后台常驻但界面用不到」的模块，**不触碰任何渲染/动画路径**：
+   GPU 合成、CSS 动画、模糊、过渡、圆角全部保持原样。
+     - MediaRouter        投屏（Cast）服务，常驻内存
+     - OptimizationHints  页面加载优化提示服务
+     - Translate          内置翻译
+     - AutofillServerCommunication  表单自动填充的远程同步
+     - InterestFeedContentSuggestions  内容推荐
+     - CalculateNativeWinOcclusion 不关（关了反而会增加后台 CPU）
+*/
+app.commandLine.appendSwitch('disable-features', [
+  'MediaRouter',
+  'OptimizationHints',
+  'Translate',
+  'AutofillServerCommunication',
+  'InterestFeedContentSuggestions',
+].join(','));
+// 组件更新器在后台定期检查下载，桌面端用不到
+app.commandLine.appendSwitch('disable-component-update');
+// 磁盘缓存上限 100MB，避免长期使用后缓存无限膨胀（不影响渲染与动画）
+app.commandLine.appendSwitch('disk-cache-size', String(100 * 1024 * 1024));
+
+const TEMP_ROOT = path.join(os.tmpdir(), 'HYWmusic-Data');
+try {
+  fs.mkdirSync(TEMP_ROOT, { recursive: true });
+  app.setPath('userData', TEMP_ROOT);
+  app.setPath('sessionData', TEMP_ROOT);
+  app.setPath('logs', path.join(TEMP_ROOT, 'logs'));
+  app.setPath('crashDumps', path.join(TEMP_ROOT, 'crashDumps'));
+} catch (err) {
+  console.error('[hyw] 设置临时数据目录失败，回退默认 userData:', err.message);
+}
+
+/*
+ * 缓存清理：只删「可再生」的浏览器缓存，不动配置 / 登录态 / 主题偏好。
+ * 启动时清一次（上次退出时被占用的文件这时已释放），退出时再尽力清一次。
+ */
+const CACHE_DIRS = ['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'ShaderCache', 'GrShaderCache', 'Service Worker/CacheStorage'];
+
+function cleanCaches(reason) {
+  let removed = 0;
+  for (const dir of CACHE_DIRS) {
+    try {
+      fs.rmSync(path.join(TEMP_ROOT, dir), { recursive: true, force: true });
+      removed += 1;
+    } catch (_) {}
+  }
+  if (removed) {
+    try { console.log(`[hyw] 已清理缓存目录 ${removed} 项（${reason}）`); } catch (_) {}
+  }
+}
+
+cleanCaches('启动');
 
 const DEFAULT_BASE_URL = 'https://103.79.184.97';
 
 /** 服务端预设（可自行增删） */
 const SERVER_PRESETS = [
-  { name: 'hywmusic', url: 'https://103.79.184.97', def: true },
+  { name: 'HYWmusic', url: 'https://103.79.184.97', def: true },
 ];
 
 /** 服务端地址（可在客户端「服务器」下拉里改，存本地配置） */
@@ -150,16 +223,26 @@ function configPath() {
   return path.join(app.getPath('userData'), 'config.json');
 }
 
+/*
+ * 配置读取缓存：currentBase() / httpRequest() 每个请求都会读配置，
+ * 原先每次都同步 readFileSync，属于不必要的磁盘 IO。这里加内存缓存，
+ * 写入时同步更新，行为与原先完全一致。
+ */
+let configCache = null;
+
 function readConfig() {
+  if (configCache) return configCache;
   try {
-    return JSON.parse(fs.readFileSync(configPath(), 'utf8')) || {};
+    configCache = JSON.parse(fs.readFileSync(configPath(), 'utf8')) || {};
   } catch (_) {
-    return {};
+    configCache = {};
   }
+  return configCache;
 }
 
 function writeConfig(patch) {
-  const next = Object.assign(readConfig(), patch);
+  const next = Object.assign({}, readConfig(), patch);
+  configCache = next;
   try {
     fs.mkdirSync(path.dirname(configPath()), { recursive: true });
     fs.writeFileSync(configPath(), JSON.stringify(next, null, 2), 'utf8');
@@ -455,7 +538,8 @@ async function musicSearch(params = {}) {
     if (params.page) q.set('page', String(params.page));
   }
 
-  const res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 45000 });
+  // 服务端首次搜索（冷缓存）实测 18-26s，超时设 30s 留出余量，避免过早失败
+  const res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
   const j = res.json;
   if (j && j.code === 200) {
     return {
@@ -625,6 +709,8 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      spellcheck: false,        // 关闭拼写检查：省词典内存与输入时的后台检查
+      backgroundThrottling: true, // 窗口隐藏/最小化时降低渲染频率（可见时不受影响）
     },
   });
 
@@ -1134,6 +1220,26 @@ function registerIpc() {
     return true;
   });
 
+  // 打开官网：地址在主进程侧拼接，渲染层不持有真实 IP
+  ipcMain.handle('app:openSite', () => {
+    const url = currentBase();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { ok: true };
+  });
+
+  // 进程级资源指标（诊断用：看清内存分布在主进程/GPU/渲染/utility）
+  ipcMain.handle('app:metrics', () => {
+    try {
+      return (app.getAppMetrics() || []).map((m) => ({
+        pid: m.pid,
+        type: m.type,
+        name: m.name || '',
+        memMB: Math.round((m.memory && m.memory.workingSetSize || 0) / 1024),
+        cpu: Math.round((m.cpu && m.cpu.percentCPUUsage || 0) * 10) / 10,
+      }));
+    } catch (_) { return []; }
+  });
+
   ipcMain.handle('app:theme', (_e, theme, bgColor) => {
     updateTitlebarOverlay(theme, bgColor);
     return true;
@@ -1192,6 +1298,11 @@ app.on('before-quit', () => {
   isQuitting = true;
   logLine('应用正常退出');
   destroyTray();
+});
+
+// 退出时清理无关缓存（部分文件可能仍被占用，失败忽略，下次启动会再清）
+app.on('will-quit', () => {
+  cleanCaches('退出');
 });
 
 app.whenReady().then(() => {

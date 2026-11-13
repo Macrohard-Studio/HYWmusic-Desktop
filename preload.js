@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('hyw', {
   /* 窗口 / 托盘 */
   info: () => ipcRenderer.invoke('app:info'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  openSite: () => ipcRenderer.invoke('app:openSite'),
+  metrics: () => ipcRenderer.invoke('app:metrics'),
   setTheme: (theme, bgColor) => ipcRenderer.invoke('app:theme', theme, bgColor),
   closePrefs: () => ipcRenderer.invoke('app:closePrefs'),
   setClosePrefs: (action, askDisabled) => ipcRenderer.invoke('app:setClosePrefs', { action, askDisabled }),

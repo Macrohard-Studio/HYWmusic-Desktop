@@ -1,11 +1,11 @@
 # HYWmusic
 
-HYWmusic（何意味音乐）**桌面音乐播放器** · Windows。
+HYWmusic（何意味音乐）**桌面音乐播放器** · Windows / Electron。
 
-左侧导航 + 顶部搜索 + 歌曲列表 + 底部播放控制栏 + 歌词面板。
+界面参考 LX Music 的布局：左侧导航 + 顶部搜索 + 歌曲列表 + 底部播放控制栏 + 歌词面板。
 音源来自何意味音乐开放接口，**开箱即用，无需注册登录**。
 
-- **版本**：v1.0.0-beta2（2026-11-13）
+- **版本**：v1.0.0-rc1（2026-11-14）
 - **许可证**：[Apache License 2.0](./LICENSE)
 
 ---
@@ -140,7 +140,7 @@ node verify-credit.js dist/win-unpacked/resources/app.asar
 启动过程会写入日志：
 
 ```
-%APPDATA%\HYWmusic\startup.log
+%LOCALAPPDATA%\Temp\HYWmusic\startup.log
 ```
 
 | 日志表现 | 说明 |
@@ -149,7 +149,7 @@ node verify-credit.js dist/win-unpacked/resources/app.asar
 | 只有「创建主窗口」后中断 | 进程被外部终止，通常是杀毒软件拦截，请将安装目录加入白名单 |
 | 出现「拉起安全模式实例」 | 已触发自愈，下次启动以安全模式运行 |
 
-长期停留在安全模式（性能略低）时，删除 `%APPDATA%\HYWmusic\safe-mode.flag` 后重启即可恢复。
+长期停留在安全模式（性能略低）时，删除 `%LOCALAPPDATA%\Temp\HYWmusic\safe-mode.flag` 后重启即可恢复。
 
 ---
 

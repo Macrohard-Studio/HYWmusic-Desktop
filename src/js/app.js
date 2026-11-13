@@ -39,10 +39,11 @@
     showVolume: false,
     detailOpen: false,
     selected: new Set(),
-    version: '1.0.0-beta2',
+    version: '1.0.0-rc1',
     baseUrl: '',
     // 只保留展示别名，渲染进程内不落地真实服务端地址
     serverLabel: '',
+    serverFull: '',
     serverIdx: 0,
     serverPresets: [],
     baseLabel: '',
@@ -53,6 +54,11 @@
   };
 
   let closePrefs = { action: 'tray', askDisabled: false };
+
+  /* 拖动状态：全局只注册一次 mousemove / mouseup，避免每次重渲染都泄漏监听器 */
+  let dragKind = null;   // 'prog' | 'vol' | null
+  let deviceSeq = 0;     // 设备列表异步竞态保护
+  let songMenuCloser = null;  // 歌曲菜单的全局关闭监听（保证只存在一个）
 
   /* ============================================================
      工具
@@ -65,6 +71,21 @@
     return !!c && !!s && c.songId === s.songId && c.platform === s.platform;
   };
   const coverOf = (s) => (s && (s.picUrl || s.img || s.cover)) || '';
+
+  /**
+   * 按显示尺寸请求封面，显著降低图片解码内存（列表只显示 36px）。
+   * 只改 URL 里的尺寸参数，不影响任何布局/动画。
+   */
+  function thumbUrl(url, size) {
+    let u = String(url || '');
+    if (!u) return '';
+    const n = size || 120;
+    // QQ 音乐：.../T002R500x500M000....jpg
+    u = u.replace(/R\d+x\d+M000/, `R${n}x${n}M000`);
+    // 网易云：...?param=500y500
+    u = u.replace(/([?&]param=)\d+y\d+/, `$1${n}y${n}`);
+    return u;
+  }
   const fmt = (sec) => API.fmtTime(sec);
 
   function toast(text, type) {
@@ -75,6 +96,210 @@
     el.textContent = text;
     box.appendChild(el);
     setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, 2600);
+  }
+
+  /* ============================================================
+     搜索结果：本地缓存 + 排序（原唱 / 高音质优先）
+     ============================================================ */
+
+  /** 同关键词短期复用，避免重复触发服务端冷启动（实测首次 18-26s、命中缓存 2-4s） */
+  const searchCache = new Map();
+  const SEARCH_TTL = 5 * 60 * 1000;
+  const SEARCH_CACHE_MAX = 24;
+
+  /** 非原唱 / 低价值版本标记（命中则大幅降权） */
+  const NOISE_RE = /(翻唱|cover|伴奏|纯音乐|钢琴|吉他|dj版|remix|抖音|女声|男声|童声|深情|治愈|片段|铃声|清唱|live|现场|节目|动画|器乐|八音盒|karaoke|instrumental|慢速|加速|降调|升调|串烧|合集|原唱|demo|试听)/i;
+
+  /** 去掉括号内容并归一化，用于判断「标题是否就是这首歌本身」 */
+  function normTitle(str) {
+    return String(str || '')
+      .replace(/[（(\[【][^）)\]】]*[）)\]】]/g, '')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+  }
+
+  /** 综合评分：歌名匹配 > 歌手匹配 > 音质 > 时长；非原唱版本降权 */
+  function songScore(song, keyword) {
+    const kw = String(keyword || '').toLowerCase().replace(/\s+/g, '');
+    const rawName = String(song.name || '');
+    const name = rawName.toLowerCase();
+    const title = normTitle(rawName);
+    const singer = String(song.singer || '').toLowerCase().replace(/\s+/g, '');
+    let score = 0;
+
+    // 歌名匹配度
+    if (kw) {
+      if (title === kw) score += 1200;
+      else if (title.startsWith(kw)) score += 800;
+      else if (title.includes(kw)) score += 500;
+      else if (name.includes(kw)) score += 200;
+      else score -= 400; // 完全不相关（如搜「晴天」混进「发如雪」）
+    }
+
+    // 搜歌手名时，原唱额外加分
+    if (kw && singer.includes(kw)) score += 700;
+
+    // 翻唱 / 伴奏 / 现场版等降权（权重高于音质，确保原唱永远排在改编版前面）
+    if (NOISE_RE.test(rawName)) score -= 1200;
+    // 标题带括号（版本说明）也降权：如「晴天 (Live)」「晴天（史诗版）」
+    if (/[（(\[【]/.test(rawName)) score -= 300;
+
+    // 音质：取「平台声明」与「实测」中更高的等级，等级越高分越高（越好越靠前）
+    let qRank = 0;
+    const types = song._original && Array.isArray(song._original.types) ? song._original.types : [];
+    for (const t of types) qRank = Math.max(qRank, qualityRank(t && t.type));
+    if (song.__probe && song.__probe.ok && song.__probe.quality) {
+      qRank = Math.max(qRank, qualityRank(song.__probe.quality));
+    }
+    score += qRank * 100;
+
+    // 时长有效性
+    const dur = Number(song.duration) || 0;
+    if (dur >= 60) score += 60;
+    else if (dur > 0) score -= 200; // 铃声 / 片段
+    else score -= 100;              // 无时长
+
+    return score;
+  }
+
+  /* ---------------- 可播性快速检测 ---------------- */
+  /*
+     用户痛点：搜索排第一的可能是「原唱但上游取不到链」的歌（如 QQ 音乐部分版权曲），
+     点下去播不了。这里在搜索出结果后，后台并发探测前若干首能否取链，
+     把确认播不了的移到列表末尾——不阻塞首屏，也不影响原唱/音质的排序优先级。
+  */
+  const probeCache = new Map();   // `${platform}:${songId}` -> { ok, quality, t }
+  const PROBE_TTL = 10 * 60 * 1000;
+  const PROBE_COUNT = 12;         // 每平台轮询取 2 条（6 源 ≈ 12 首），保证每个音源都参与
+  const PROBE_CONCURRENCY = 6;    // 同时最多 6 个请求
+  const PROBE_TIMEOUT = 5000;     // 单条上限 5s：实测成功多在 1-7s，超时即视为暂不可播
+
+  let searchToken = 0;            // 防止旧搜索的检测结果覆盖新搜索
+
+  /** 音质等级（数值越大越高） */
+  function qualityRank(q) {
+    const m = { '128k': 1, '320k': 2, 'flac': 3, 'flac24bit': 4, 'flac32bit': 5, hires: 6, atmos: 6, master: 7 };
+    return m[String(q || '').toLowerCase()] || 0;
+  }
+
+  /** 探测单首是否可播（带缓存 + 超时） */
+  async function probeSong(song) {
+    const key = `${song.platform}:${song.songId}`;
+    const hit = probeCache.get(key);
+    if (hit && Date.now() - hit.t < PROBE_TTL) return hit;
+
+    let out;
+    try {
+      const res = await Promise.race([
+        API.playUrl({
+          platform: song.platform,
+          songId: song.songId,
+          quality: API.apiQuality(S.quality),
+          name: song.name,
+          singer: song.singer,
+        }),
+        new Promise((r) => setTimeout(() => r(null), PROBE_TIMEOUT)),
+      ]);
+      out = res && res.ok
+        ? { ok: true, quality: (res.data && (res.data.actualQuality || res.data.quality)) || '', t: Date.now() }
+        : { ok: false, quality: '', t: Date.now() };
+    } catch (_) {
+      out = { ok: false, quality: '', t: Date.now() };
+    }
+    probeCache.set(key, out);
+    return out;
+  }
+
+  /** 重排：保持「原唱 + 音质」顺序，仅把已确认播不了的移到末尾 */
+  function rerankWithProbe(list, keyword) {
+    const ranked = rankSongs(list, keyword);
+    const ok = [];
+    const dead = [];
+    for (const song of ranked) {
+      if (song.__probe && song.__probe.ok === false) dead.push(song);
+      else ok.push(song);
+    }
+    return ok.concat(dead);
+  }
+
+  /** 按平台轮询取样：保证每个音源都有样本，而不是只测排在前面的同一个源 */
+  function pickProbeTargets(list, max) {
+    const byPlatform = new Map();
+    for (const song of list) {
+      if (!byPlatform.has(song.platform)) byPlatform.set(song.platform, []);
+      byPlatform.get(song.platform).push(song);
+    }
+    const groups = Array.from(byPlatform.values());
+    const out = [];
+    for (let round = 0; out.length < max; round++) {
+      let added = false;
+      for (const group of groups) {
+        if (group[round] && out.length < max) { out.push(group[round]); added = true; }
+      }
+      if (!added) break;
+    }
+    return out;
+  }
+
+  /** 限制并发的 map */
+  async function mapLimit(items, limit, fn) {
+    const out = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const i = cursor++;
+        out[i] = await fn(items[i], i);
+      }
+    });
+    await Promise.all(workers);
+    return out;
+  }
+
+  /** 后台探测（覆盖所有音源）并重排，不阻塞首屏 */
+  async function probeAndRerank(keyword, token) {
+    const targets = pickProbeTargets(S.results, PROBE_COUNT);
+    if (!targets.length) return;
+    const results = await mapLimit(targets, PROBE_CONCURRENCY, (song) => probeSong(song));
+    if (token !== searchToken) return; // 搜索已变化，丢弃本次结果
+    targets.forEach((song, i) => { song.__probe = results[i]; });
+    S.results = rerankWithProbe(S.results, keyword);
+    renderContent();
+    const dead = results.filter((r) => r && r.ok === false).length;
+    const plats = new Set(targets.map((x) => x.platform)).size;
+    toast(
+      dead > 0
+        ? `已检测 ${targets.length} 首（${plats} 个音源）：${dead} 首暂不可播，已移到后面`
+        : `已检测 ${targets.length} 首（${plats} 个音源）：全部可播`,
+      'ok'
+    );
+  }
+
+  /**
+   * 稳定排序：分数降序，同分保持服务端原顺序。
+   * 排序后做一次「同名 + 同歌手」去重——同一首歌在不同平台会返回多条，
+   * 只保留排序最靠前的那条（通常是音质最好/可播的那条），避免列表里反复出现。
+   */
+  function rankSongs(list, keyword) {
+    const sorted = (list || [])
+      .map((song, index) => ({ song, index, score: songScore(song, keyword) }))
+      .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+      .map((x) => x.song);
+
+    // 同名 + 同歌手 视为同一首歌：列表只展示音质最好的那条，
+    // 其余音源的版本挂到 __alts 上作为备选（播放失败时可直接换源，不用重新搜索）
+    const groups = new Map();
+    const out = [];
+    for (const song of sorted) {
+      const key = `${normTitle(song.name)}|${String(song.singer || '').toLowerCase().replace(/\s+/g, '')}`;
+      const keeper = groups.get(key);
+      if (keeper) {
+        (keeper.__alts = keeper.__alts || []).push(song);
+        continue;
+      }
+      groups.set(key, song);
+      out.push(song);
+    }
+    return out;
   }
 
   /* ============================================================
@@ -168,13 +393,13 @@
       </div>
       ${playerBarHtml()}
       ${S.detailOpen ? detailHtml() : ''}
-      ${S.showQueue ? queuePanelHtml() : ''}
-      ${S.showVolume ? volumePanelHtml() : ''}
     `;
     renderContent();
     renderPlayerBar();
     if (S.detailOpen) renderDetail();
-    if (S.showVolume) mountVolumePanel();
+    // 浮层统一挂到 body（每次先删旧的），避免与 #app 内重复生成同 ID 元素
+    if (S.showQueue) mountQueuePanel(); else { const q = $('#qpanel'); if (q) q.remove(); }
+    if (S.showVolume) mountVolumePanel(); else { const v = $('#vpanel'); if (v) v.remove(); }
   }
 
   const NAV_ONLINE = [
@@ -266,20 +491,13 @@
     return `
       <header class="topbar">
         <div class="search">
-          ${icon('search', 16)}
+          ${icon('search', 17)}
           <input id="q" type="text" placeholder="搜索歌曲 / 歌手 / 专辑" value="${esc(S.query)}" spellcheck="false"/>
           ${S.query ? `<button class="search__clear" data-act="clear-q">${icon('x', 13)}</button>` : ''}
           <button class="search__go" data-act="do-search">搜索</button>
         </div>
         <div class="topbar__filters">
-          <label class="pick pick--sm" title="音源">
-            <span class="pick__lb">音源</span>
-            <select id="sel-platform">
-              ${API.PLATFORMS.map((p) => `<option value="${p.id}"${S.platform === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
-            </select>
-          </label>
           <label class="pick pick--sm" title="搜索引擎">
-            <span class="pick__lb">引擎</span>
             <select id="sel-engine">
               <option value="lx"${S.engine === 'lx' ? ' selected' : ''}>LX 引擎</option>
               <option value="api"${S.engine === 'api' ? ' selected' : ''}>聚合引擎</option>
@@ -288,7 +506,6 @@
 
           <div class="drop" id="qdrop">
             <button class="pick pick--btn" data-act="quality-menu" title="优先播放的音质（如果可用）">
-              <span>音质</span>
               <b class="pick__val">${crownOf(S.quality)}${esc(API.qualityName(S.quality))}</b>
               ${icon('chevronDown', 14)}
             </button>
@@ -303,15 +520,14 @@
           </div>
 
           <div class="drop" id="sdrop">
-            <button class="pick pick--btn" data-act="server-menu" title="服务端地址">
-              <span>服务器</span>
+            <button class="pick pick--btn" data-act="server-menu" title="服务端线路：${esc(S.serverFull || serverLabel())}">
               <b class="pick__val">${esc(serverLabel())}</b>
               ${icon('chevronDown', 14)}
             </button>
             ${S.sMenuOpen ? `<div class="dmenu dmenu--wide">
               ${(S.serverPresets.length ? S.serverPresets : [{ name: '默认线路', label: '默认线路', def: true }]).map((p, i) => `
                 <button class="dmenu__i${i === S.serverIdx ? ' on' : ''}" data-spick="${i}">
-                  <span class="dmenu__t"><b>${esc(presetLabel(p))}</b><small>${p.def ? '默认线路' : '备用线路'}</small></span>
+                  <span class="dmenu__t"><b>${esc(p.name || presetLabel(p))}</b><small>${esc(p.label || (p.def ? '默认线路' : '备用线路'))}</small></span>
                   ${i === S.serverIdx ? icon('check', 14) : ''}
                 </button>`).join('')}
               <div class="dmenu__sep"></div>
@@ -365,8 +581,9 @@
 
   function viewSearch() {
     const bar = platformBar();
-    if (S.loading) return bar + `<div class="placeholder"><span class="spin"></span><p>正在搜索「${esc(S.query)}」…</p></div>`;
-    if (S.error) return bar + `<div class="placeholder">${icon('wifiOff', 34)}<p>${esc(S.error)}</p><button class="btn" data-act="do-search">重试</button></div>`;
+    if (S.loading) return bar + `<div class="placeholder"><span class="spin"></span><p>正在搜索「${esc(S.query)}」…</p>
+        <p class="ph-sub">首次搜索服务端需建立缓存，可能稍慢；再次搜索会很快</p></div>`;
+    if (S.error) return bar + `<div class="placeholder">${icon('wifiOff', 34)}<p>${esc(S.error)}</p><button class="btn" data-act="retry-search">重试</button></div>`;
     if (!S.results.length) {
       return bar + `<div class="placeholder">${icon('headphones', 42)}
         <p>${S.query ? '没有找到相关歌曲，试试切换音源或引擎' : '输入关键词，开始搜索音乐'}</p>
@@ -535,7 +752,7 @@
           <button class="row__play" data-act="play-row" data-idx="${i}" title="播放">${icon('play', 13)}</button>
         </span>
         <span class="c-title">
-          ${cover ? `<img class="cover" src="${esc(cover)}" loading="lazy" alt="" onerror="this.style.visibility='hidden'"/>`
+          ${cover ? `<img class="cover" src="${esc(thumbUrl(cover, 120))}" loading="lazy" alt="" data-cover="1" decoding="async"/>`
                   : `<span class="cover cover--ph">${icon('music', 15)}</span>`}
           <span class="tt"><b>${esc(s.name || '未知歌曲')}</b>${q ? `<em class="qtag">${esc(q)}</em>` : ''}</span>
         </span>
@@ -674,7 +891,7 @@
             </select></div>
           <div class="field"><label>搜索结果数量</label>
             <select id="set-limit">
-              ${[30, 60, 100].map((n) => `<option value="${n}"${S.limit === n ? ' selected' : ''}>${n} 条</option>`).join('')}
+              ${[20, 30, 50].map((n) => `<option value="${n}"${(S.limit || 30) === n ? ' selected' : ''}>${n} 条</option>`).join('')}
             </select></div>
         </div>`;
     }
@@ -879,7 +1096,7 @@
       <footer class="pbar" id="pbar">
         <div class="pbar__left">
           <div class="pbar__cover" data-act="open-detail" title="点击展开播放详情">
-            ${cover ? `<img src="${esc(cover)}" alt=""/>` : icon('disc', 22)}
+            ${cover ? `<img src="${esc(thumbUrl(cover, 200))}" alt="" data-cover="1" decoding="async"/>` : icon('disc', 22)}
           </div>
           <div class="pbar__meta">
             <b id="pb-name" title="${c ? esc(c.name) : ''}">${c ? esc(c.name) : '未在播放'}</b>
@@ -954,27 +1171,26 @@
   }
 
   function mountVolumePanel() {
+    // 幂等：先清掉旧的（可能在 #app 内或 body 末尾），再挂到 body
+    $$('#vpanel').forEach((el, i) => { if (i > 0 || el.closest('#app')) el.remove(); });
+    if (!$('#vpanel')) document.body.insertAdjacentHTML('beforeend', volumePanelHtml());
     const panel = $('#vpanel');
     if (!panel) return;
 
-    // 滑块拖动
+    // 滑块拖动（mousemove/mouseup 由 bindGlobalDrag 统一处理）
     const slider = $('#vp-slider');
     if (slider) {
-      let drag = false;
-      const at = (e) => {
-        const r = slider.getBoundingClientRect();
-        const v = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-        P.setVolume(v);
-        API.storeSet({ volume: v });
-        syncVolumeUI();
-      };
-      slider.addEventListener('mousedown', (e) => { drag = true; at(e); e.preventDefault(); });
-      window.addEventListener('mousemove', (e) => { if (drag) at(e); });
-      window.addEventListener('mouseup', () => { drag = false; });
+      slider.addEventListener('mousedown', (e) => {
+        dragKind = 'vol';
+        setVolumeAt(e);
+        e.preventDefault();
+      });
     }
 
-    // 设备列表
+    // 设备列表（竞态保护：只有最后一次请求能写入）
+    const seq = ++deviceSeq;
     P.listDevices().then((devs) => {
+      if (seq !== deviceSeq) return;
       const box = $('#vp-devices');
       if (!box) return;
       if (!devs.length) {
@@ -989,19 +1205,7 @@
         </button>`).join('');
     });
 
-    // 面板外点击关闭
-    setTimeout(() => {
-      const close = (ev) => {
-        const p = $('#vpanel');
-        const btn = ev.target.closest('[data-act="volume-panel"]');
-        if (p && !p.contains(ev.target) && !btn) {
-          S.showVolume = false;
-          p.remove();
-          document.removeEventListener('click', close, true);
-        }
-      };
-      document.addEventListener('click', close, true);
-    }, 0);
+    // 面板外点击关闭由 bindGlobalDrag 统一处理，此处不再重复注册
   }
 
   function syncVolumeUI() {
@@ -1043,7 +1247,7 @@
     const cover = c ? coverOf(c) : '';
     const cv = $('#detail-cover');
     if (cv) {
-      cv.innerHTML = cover ? `<img src="${esc(cover)}" alt=""/>` : icon('disc', 64);
+      cv.innerHTML = cover ? `<img src="${esc(cover)}" alt="" data-cover="1" decoding="async"/>` : icon('disc', 64);
       cv.classList.toggle('spin', P.playing);
     }
     const bg = $('#detail-bg');
@@ -1201,11 +1405,8 @@
      事件绑定
      ============================================================ */
 
-  /** 让顶栏「音源」下拉与内容区音源切换条保持一致 */
-  function syncPlatformSel() {
-    const el = $('#sel-platform');
-    if (el && el.value !== S.platform) el.value = S.platform;
-  }
+  /** 顶栏音源下拉已移除，音源只由内容区切换条控制；保留空实现避免调用处报错 */
+  function syncPlatformSel() {}
 
   function bindContent() {
     const q = $('#q');
@@ -1216,7 +1417,6 @@
       });
     }
     const bindSel = (sel, fn) => { const el = $(sel); if (el) el.addEventListener('change', () => fn(el.value)); };
-    bindSel('#sel-platform', (v) => { S.platform = v; API.storeSet({ platform: v }); if (S.query) doSearch(); else renderContent(); });
     bindSel('#sel-engine', (v) => { S.engine = v; API.storeSet({ engine: v }); if (S.query) doSearch(); });
     bindSel('#sel-quality', (v) => { S.quality = v; P.setQuality(v); API.storeSet({ quality: v }); renderPlayerBar(); });
     bindSel('#set-quality', (v) => { S.quality = v; P.setQuality(v); API.storeSet({ quality: v }); renderPlayerBar(); });
@@ -1283,15 +1483,11 @@
   function bindPlayerBar() {
     const prog = $('#pb-prog');
     if (prog) {
-      let drag = false;
-      const at = (e) => {
-        const r = prog.getBoundingClientRect();
-        const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-        P.seek(ratio * (P.duration || 0));
-      };
-      prog.addEventListener('mousedown', (e) => { drag = true; at(e); e.preventDefault(); });
-      window.addEventListener('mousemove', (e) => { if (drag) at(e); });
-      window.addEventListener('mouseup', () => { drag = false; });
+      prog.addEventListener('mousedown', (e) => {
+        dragKind = 'prog';
+        seekProgressAt(e);
+        e.preventDefault();
+      });
     }
     // 悬停音量按钮滚轮微调（规格 3.3）
     const volBtn = $('[data-act="volume-panel"]');
@@ -1303,6 +1499,54 @@
         syncVolumeUI();
       }, { passive: false });
     }
+  }
+
+  function seekProgressAt(e) {
+    const prog = $('#pb-prog');
+    if (!prog) return;
+    const r = prog.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    P.seek(ratio * (P.duration || 0));
+  }
+
+  function setVolumeAt(e) {
+    const slider = $('#vp-slider');
+    if (!slider) return;
+    const r = slider.getBoundingClientRect();
+    const v = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    P.setVolume(v);
+    API.storeSet({ volume: v });
+    syncVolumeUI();
+  }
+
+  /** 封面图加载失败兜底（CSP 禁止内联 onerror，改用捕获阶段监听） */
+  function bindImageFallback() {
+    document.addEventListener('error', (e) => {
+      const el = e.target;
+      if (el && el.tagName === 'IMG' && el.dataset && el.dataset.cover) {
+        el.style.visibility = 'hidden';
+      }
+    }, true);
+  }
+
+  /** 全局拖动监听 —— 整个生命周期只注册一次 */
+  function bindGlobalDrag() {
+    window.addEventListener('mousemove', (e) => {
+      if (dragKind === 'prog') seekProgressAt(e);
+      else if (dragKind === 'vol') setVolumeAt(e);
+    });
+    window.addEventListener('mouseup', () => { dragKind = null; });
+
+    // 音量面板「点外面关闭」也只注册一次
+    document.addEventListener('click', (ev) => {
+      if (!S.showVolume) return;
+      const p = $('#vpanel');
+      const btn = ev.target.closest('[data-act="volume-panel"]');
+      if (p && !p.contains(ev.target) && !btn) {
+        S.showVolume = false;
+        p.remove();
+      }
+    }, true);
   }
 
   document.addEventListener('click', async (e) => {
@@ -1358,7 +1602,9 @@
       const i = Number(sp.dataset.spick) || 0;
       const r = await API.setServer(i);
       S.serverIdx = i;
-      S.serverLabel = (r && r.label) || presetLabel(S.serverPresets[i]);
+      const p2 = S.serverPresets[i];
+      S.serverLabel = (p2 && (p2.name || p2.label)) || presetLabel(p2);
+      S.serverFull = (r && r.label) || S.serverLabel;
       S.sMenuOpen = false;
       toast('已切换到 ' + S.serverLabel);
       render();
@@ -1380,6 +1626,8 @@
     const list = currentList();
 
     if (act === 'do-search') return doSearch();
+    // 错误页的「重试」：强制绕过缓存重新请求
+    if (act === 'retry-search') return doSearch(false, true);
     if (act === 'clear-q') { S.query = ''; renderContent(); return; }
 
     if (act === 'play-row') { playFrom(actEl.dataset.q ? P.state.queue : list, idx); return; }
@@ -1433,9 +1681,8 @@
 
     if (act === 'volume-panel') {
       S.showVolume = !S.showVolume;
-      const old = $('#vpanel');
-      if (old) old.remove();
-      if (S.showVolume) { document.body.insertAdjacentHTML('beforeend', volumePanelHtml()); mountVolumePanel(); }
+      if (S.showVolume) mountVolumePanel();
+      else { $$('#vpanel').forEach((el) => el.remove()); }
       return;
     }
 
@@ -1532,8 +1779,9 @@
       return;
     }
     if (act === 'open-site') {
-      // 官网入口：默认线路没有独立站点，不打开任何地址（避免顺带泄露）
-      if (S.baseLabel) toast(S.baseLabel + '：可正常使用，无需访问网页');
+      // 官网入口：任何时候都直接打开（地址由主进程拼接，渲染层不持有真实 IP）
+      const r = await API.openSite().catch(() => null);
+      if (!r || !r.ok) toast('打开官网失败，请稍后重试', 'err');
       return;
     }
     if (act === 'to-tray') { API.minimizeToTray(); return; }
@@ -1543,7 +1791,9 @@
   function mountVolumePanelRefresh() {
     const box = $('#vp-devices');
     if (!box) return;
+    const seq = ++deviceSeq;
     P.listDevices().then((devs) => {
+      if (seq !== deviceSeq) return;
       box.innerHTML = devs.length
         ? devs.map((d) => `
             <button class="vdev${d.active ? ' on' : ''}" data-device="${esc(d.id)}">
@@ -1571,21 +1821,67 @@
      业务
      ============================================================ */
 
-  async function doSearch(playFirst) {
+  async function doSearch(playFirst, forceRefresh) {
     const kw = (S.query || '').trim();
     if (!kw) { toast('请输入搜索关键词'); return; }
-    S.view = 'search'; S.loading = true; S.error = ''; S.results = [];
-    render();
-    const res = await API.search({ keyword: kw, platform: S.platform, mode: S.engine, limit: S.limit || 60 });
-    S.loading = false;
-    if (res && res.ok) {
-      S.results = res.data || [];
-      S.resultMeta = res.mode === 'api' ? '聚合引擎' : 'LX 引擎';
-      if (playFirst && S.results.length) { renderContent(); playFrom(S.results, 0); return; }
-    } else {
-      S.error = (res && res.error) || '搜索失败';
+
+    const limit = S.limit || 30;
+    const cacheKey = `${kw}|${S.platform}|${S.engine}|${limit}`;
+
+    S.view = 'search'; S.error = ''; S.results = [];
+    const token = ++searchToken;
+
+    // 命中缓存：直接出结果，不再等网络
+    if (!forceRefresh) {
+      const hit = searchCache.get(cacheKey);
+      if (hit && Date.now() - hit.t < SEARCH_TTL) {
+        S.loading = false;
+        S.results = hit.data;
+        S.resultMeta = hit.meta;
+        if (playFirst && S.results.length) { renderContent(); playFrom(S.results, 0); return; }
+        renderContent();
+        return;
+      }
     }
+
+    S.loading = true;
+    render();
+
+    try {
+      const res = await API.search({ keyword: kw, platform: S.platform, mode: S.engine, limit });
+      if (res && res.ok) {
+        const ranked = rankSongs(res.data || [], kw);
+        const meta = res.mode === 'api' ? '聚合引擎' : 'LX 引擎';
+        S.results = ranked;
+        S.resultMeta = meta;
+        // 写入缓存（超上限时淘汰最早的一条）
+        if (searchCache.size >= SEARCH_CACHE_MAX) {
+          const oldest = searchCache.keys().next().value;
+          searchCache.delete(oldest);
+        }
+        searchCache.set(cacheKey, { t: Date.now(), data: ranked, meta });
+      } else {
+        S.error = (res && res.error) || '搜索失败';
+      }
+    } catch (err) {
+      const msg = String((err && err.message) || err || '');
+      const clean = msg.replace(/^Error invoking remote method '[^']+':\s*/, '');
+      if (/超时|timeout/i.test(msg)) {
+        S.error = '搜索超时：服务端响应较慢，请点「重试」，或换个关键词';
+      } else if (/net::|ERR_|ENOTFOUND|ECONN/i.test(msg)) {
+        S.error = '无法连接到服务器，请检查网络或在「服务器」里更换线路';
+      } else {
+        S.error = '搜索失败：' + (clean || '请稍后重试');
+      }
+    } finally {
+      S.loading = false;
+    }
+
+    if (playFirst && S.results.length) { renderContent(); playFrom(S.results, 0); return; }
     renderContent();
+
+    // 首屏已出，后台再探测可播性并微调顺序（不阻塞）
+    if (S.results.length) probeAndRerank(kw, token);
   }
 
   async function loadLyrics(song) {
@@ -1627,10 +1923,18 @@
     } else if (r && !r.canceled) toast((r && r.error) || '下载失败', 'err');
   }
 
+  function closeSongMenu() {
+    const m = $('#songmenu');
+    if (m) m.remove();
+    if (songMenuCloser) {
+      document.removeEventListener('click', songMenuCloser);
+      songMenuCloser = null;
+    }
+  }
+
   function openSongMenu(song, anchor) {
     if (!song) return;
-    const old = $('#songmenu');
-    if (old) old.remove();
+    closeSongMenu();
     const fav = isFav(song);
     const menu = document.createElement('div');
     menu.id = 'songmenu';
@@ -1654,13 +1958,14 @@
     const mw = menu.offsetWidth || 190, mh = menu.offsetHeight || 300;
     menu.style.left = Math.max(8, Math.min(r.left - mw + 30, window.innerWidth - mw - 12)) + 'px';
     menu.style.top = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - mh - 12)) + 'px';
-    const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } };
-    setTimeout(() => document.addEventListener('click', close), 0);
+    const close = (ev) => { if (!menu.contains(ev.target)) closeSongMenu(); };
+    songMenuCloser = close;
+    setTimeout(() => { if (songMenuCloser === close) document.addEventListener('click', close); }, 0);
     menu.addEventListener('click', async (ev) => {
       const b = ev.target.closest('[data-m]');
       if (!b) return;
       const m = b.dataset.m;
-      menu.remove();
+      closeSongMenu();
       if (m === 'play') P.playSong(song);
       if (m === 'next') { P.addToQueue(song, true); toast('已设为下一首播放', 'ok'); }
       if (m === 'later') addLater(song);
@@ -1684,6 +1989,7 @@
   function applyTheme(pref) {
     S.themePref = pref || S.themePref;
     window.Theme.apply(S.themePref);
+    try { localStorage.setItem('hyw-theme', S.themePref); } catch (_) {}
   }
 
   /* ============================================================
@@ -1723,7 +2029,7 @@
       if (e.key === 'Escape') {
         if (S.detailOpen) { S.detailOpen = false; render(); return; }
         if (S.showVolume) { S.showVolume = false; const p = $('#vpanel'); if (p) p.remove(); return; }
-        const m = $('#songmenu'); if (m) m.remove();
+        closeSongMenu();
         if (document.fullscreenElement) document.exitFullscreen();
         return;
       }
@@ -1756,13 +2062,20 @@
      ============================================================ */
 
   async function boot() {
-    const info = await API.info().catch(() => null);
-    if (info) { S.version = info.version; S.baseLabel = info.baseLabel || ''; }
+    // 关键数据并行取：原来多个 IPC 串行 await 是启动慢的主因
+    const [info, stRaw, cp, srv] = await Promise.all([
+      API.info().catch(() => null),
+      API.storeGet().catch(() => null),
+      API.closePrefs().catch(() => null),
+      API.getServer().catch(() => null),
+    ]);
+    const st = stRaw || {};
 
-    const st = (await API.storeGet().catch(() => null)) || {};
+    if (info) { S.version = info.version; S.baseLabel = info.baseLabel || ''; }
     S.themePref = st.themePref || 'auto';
     if (st.quality) S.quality = st.quality;
-    if (st.platform) S.platform = st.platform;
+    // 搜索默认「全部」音源：不恢复上次选择，避免用户下次打开只剩单平台
+    S.platform = 'all';
     if (st.engine) S.engine = st.engine;
     if (st.playMode) P.setMode(st.playMode);
     if (typeof st.volume === 'number') P.setVolume(st.volume);
@@ -1776,24 +2089,23 @@
     if (typeof st.lyScale === 'boolean') S.lyScale = st.lyScale;
     if (st.lyAlign) S.lyAlign = st.lyAlign;
     if (typeof st.lyDrag === 'boolean') S.lyDrag = st.lyDrag;
-    closePrefs = (await API.closePrefs().catch(() => null)) || { action: 'tray', askDisabled: false };
+    closePrefs = cp || { action: 'tray', askDisabled: false };
 
     // 服务端线路：只取展示别名，渲染进程不保存真实地址
-    const srv = await API.getServer().catch(() => null);
     if (srv) {
       S.serverPresets = srv.preset || [];
-      S.serverLabel = srv.label || srv.alias || '默认线路';
       // 主进程已比对过本地配置，直接告知当前命中哪个预设（-1 = 自定义地址）
       S.serverIdx = typeof srv.index === 'number' ? srv.index : 0;
+      const cur = S.serverPresets[S.serverIdx] || S.serverPresets[0];
+      // 顶栏只显示短名（如 hywmusic），完整别名放到 tooltip，避免下拉过宽
+      S.serverLabel = (cur && (cur.name || cur.label)) || srv.alias || '默认线路';
+      S.serverFull = srv.label || srv.alias || '';
     }
-
-    // 恢复上次的登录状态
-    S.cardKey = (await API.cardKeyStatus().catch(() => null)) || { active: false };
-    const as = await API.adminSession().catch(() => null);
-    S.admin = as && as.loggedIn ? { loggedIn: true, user: as.user } : { loggedIn: false, user: null };
 
     applyTheme(S.themePref);
     hookPlayer();
+    bindImageFallback();
+    bindGlobalDrag();
     render();
     bindKeys();
 
@@ -1808,10 +2120,20 @@
       document.documentElement.classList.toggle('is-hidden', hidden);
     });
 
+    // 启动耗时标记（诊断用，无副作用）
+    try { window.__bootMs = Math.round(performance.now()); } catch (_) {}
+
+    // 首屏已渲染，尽快收起启动动画（150ms 让首帧稳定，避免闪烁）
     setTimeout(() => {
       const b = $('#boot');
-      if (b) { b.classList.add('hide'); setTimeout(() => b.remove(), 500); }
-    }, 600);
+      if (b) { b.classList.add('hide'); setTimeout(() => b.remove(), 400); }
+    }, 150);
+
+    // 登录态不影响首屏，后台补（打开设置页时已有值）
+    API.cardKeyStatus().then((k) => { S.cardKey = k || { active: false }; }).catch(() => {});
+    API.adminSession().then((as) => {
+      S.admin = as && as.loggedIn ? { loggedIn: true, user: as.user } : { loggedIn: false, user: null };
+    }).catch(() => {});
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

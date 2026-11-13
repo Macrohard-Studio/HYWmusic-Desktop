@@ -1,8 +1,8 @@
 # Source · HYWmusic 桌面播放器源码快照
 
-> **版本：v1.0.0-beta2** ｜ 归档日期：2026-11-13
+> **版本：v1.0.0-beta3** ｜ 归档日期：2026-11-14（覆盖更新）
 >
-> 与 `../v1.0.0-beta2/` 中的三个可执行文件**一一对应**（同一份源码构建）。
+> 与 `../v1.0.0-beta3/HYWmusic-Portable-1.0.0-beta3.exe` **一一对应**（同一份源码构建）。
 
 ---
 
@@ -14,7 +14,7 @@
 - ❌ 不含 `release/` / `dist/` / `shots/`（构建产物与测试截图）
 - ✅ 包含全部可编辑源码、图标资源、依赖锁定文件、许可证与文档
 
-总大小约 **574K**，23 个文件。
+总大小约 **600K**，24 个文件。
 
 ## 目录结构
 
@@ -69,9 +69,12 @@ node verify-credit.js <app.asar>   # 交付前署名自检
 打包（输出已配置到 `version/` 的对应版本目录）：
 
 ```bash
-npm run pack         # -> ../v1.0.0-beta2/portable/
-npm run dist         # -> ../v1.0.0-beta2/  (安装包 + 单文件便携版)
+npm run dist         # -> ../v1.0.0-beta3/HYWmusic-Portable-1.0.0-beta3.exe
 ```
+
+> **📌 交付规格（beta3 起）**：只交付**一个单文件便携版 exe**。
+> 安装版（NSIS）与文件夹便携版（`electron-packager`）都已移除，`npm run dist` 固定为 `--win portable`。
+> 运行数据统一在 `%LOCALAPPDATA%\Temp\HYWmusic-Data\`（见 `main.js` 顶部 `TEMP_ROOT`）。
 
 国内网络需设置镜像：
 
@@ -90,6 +93,39 @@ export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-b
 4. `README.md` 的版本与日期
 5. `../README.md` 的版本清单
 6. `../../../_spec/界面观察笔记与验证报告.md` 的日期与交付路径
+7. 本文件（`SOURCE.md`）的版本号与变更清单
+
+## beta3 相对 beta2 的源码变更
+
+> 2026-11-14 覆盖更新：在原有 beta3 基础上追加「搜索排序 / 缓存 / 默认全部 / 换源与取链失败兜底」。
+> 下面同时列出两批改动。
+
+- `main.js`：运行数据（userData / sessionData / logs / crashDumps）改到 `%LOCALAPPDATA%\Temp\HYWmusic-Data`；目录名刻意避开自解压目录 `HYWmusic`
+- `package.json`：`version` → 1.0.0-beta3；`win.target` 只保留 `portable`；移除 `pack` 脚本；`dist` 固定 `--win portable`
+- `app.js`：
+  - 搜索超时不再卡死（`doSearch` 加 try/catch/finally，IPC 抛错时复位 `loading` 并给中文提示）
+  - 修复监听器泄漏：`mousemove` / `mouseup` / 面板外点击改为全局只注册一次（`bindGlobalDrag`）
+  - 修复浮层重复：音量面板 / 播放队列统一由幂等 `mount*` 函数挂到 body，不再在 `#app` 内重复生成同 ID 元素
+  - 修复歌曲菜单关闭监听残留（`closeSongMenu` 统一收口）
+  - 修复封面图 CSP 违规：去掉内联 `onerror`，改用捕获阶段 `bindImageFallback`
+  - 设备列表加请求序号，避免异步竞态覆盖
+- `app.js`（2026-11-14 追加）：
+  - 新增 `rankSongs` / `songScore` / `normTitle`：原唱优先、高音质优先、翻唱与版本括号降权
+  - 新增 `searchCache`（5 分钟 / 24 条）：重复搜索走缓存
+  - 默认音源固定 `all`，默认条数 30
+  - `retry-search` 按钮补上处理分支（强制绕过缓存）
+  - 网络类错误转中文提示
+  - 顶栏移除「音源」下拉（`#sel-platform` 及绑定一并删除），音源只由内容区切换条控制
+  - 服务器标签改用短名（`S.serverFull` 存完整别名供 tooltip）
+- `player.css`：
+  - 搜索框放大（min 280 / max 820 / 高 34），字号 14px
+  - 顶栏控件高度统一 34px；`.topbar__gap` 改 `flex: 0 0 var(--wctrl-w)` 不再抢空间
+- `player.js`：
+  - 保留 beta2 的音频失效自动重取链
+  - `findAlternative` 内搜索异常兜底（原来会中断整个播放流程）
+  - 换源限 3 个平台 + 12 秒总超时
+  - 取链失败自动跳下一首（`failStreak`，连续 5 次停止防死循环）
+  - 连续失败时不再重复换源（`failStreak === 0` 才换），跳过更快
 
 ## beta2 相对 beta1 的源码变更
 

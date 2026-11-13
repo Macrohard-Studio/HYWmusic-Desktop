@@ -45,15 +45,22 @@
    * 音质降级链：所选档位拿不到时，自动向下取最高可用档位（不报错、不空播）。
    * 实测 flac32bit 服务端会返回 400，必须靠这条链兜底。
    */
+  /*
+   * 取链顺序：始终从最高档往下试，第一个成功的就是当前能拿到的最好音质。
+   * 设置里的「优先播放的音质」只作为**排序参考**，不限制实际播放质量。
+   * 服务端对拿不到的档位会自动回落，因此多数情况下一次即可命中。
+   */
+  const QUALITY_CHAIN = ['master', 'atmos', 'hires', 'flac32bit', 'flac24bit', 'flac', '320k', '128k'];
+
   const QUALITY_FALLBACK = {
-    master: ['master', 'atmos', 'hires', 'flac24bit', 'flac', '320k', '128k'],
-    atmos: ['atmos', 'hires', 'flac24bit', 'flac', '320k', '128k'],
-    hires: ['hires', 'flac24bit', 'flac', '320k', '128k'],
-    flac32bit: ['flac32bit', 'flac24bit', 'flac', '320k', '128k'],
-    flac24bit: ['flac24bit', 'flac', '320k', '128k'],
-    flac16bit: ['flac', '320k', '128k'],
-    '320k': ['320k', '128k'],
-    '128k': ['128k'],
+    master: QUALITY_CHAIN,
+    atmos: QUALITY_CHAIN,
+    hires: QUALITY_CHAIN,
+    flac32bit: QUALITY_CHAIN,
+    flac24bit: QUALITY_CHAIN,
+    flac16bit: QUALITY_CHAIN,
+    '320k': QUALITY_CHAIN,
+    '128k': QUALITY_CHAIN,
   };
 
   const PLAY_MODES = [
@@ -108,6 +115,7 @@
     storeGet: () => bridge.storeGet(),
     storeSet: (patch) => bridge.storeSet(patch),
     openExternal: (url) => bridge.openExternal(url),
+    openSite: () => bridge.openSite(),
     setTheme: (t, bg) => bridge.setTheme(t, bg),
     getServer: () => bridge.getServer(),
     setServer: (u) => bridge.setServer(u),

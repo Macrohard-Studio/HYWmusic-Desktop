@@ -1,7 +1,7 @@
 {
   "name": "hywmusic-desktop",
   "productName": "HYWmusic",
-  "version": "1.0.0-beta2",
+  "version": "1.0.0-rc1",
   "description": "HYWmusic 何意味音乐 · 智能音源聚合服务桌面客户端",
   "main": "main.js",
   "author": "BennerRock",
@@ -9,15 +9,14 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "pack": "electron-packager . HYWmusic --platform=win32 --arch=x64 --out=\"../version/v1.0.0-beta2/portable\" --icon=build/icon.ico --asar --app-version=1.0.0-beta2 --ignore=\"\\.npmrc\" --ignore=\"release\" --ignore=\"dist\" --ignore=\"node_modules/(?!electron)\"",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win portable --x64"
   },
   "build": {
     "appId": "com.hywmusic.desktop",
     "productName": "HYWmusic",
     "copyright": "Copyright © 2026 BennerRock",
     "directories": {
-      "output": "../version/v1.0.0-beta2",
+      "output": "../version/v1.0.0-rc1",
       "buildResources": "build"
     },
     "files": [
@@ -31,12 +30,6 @@
     ],
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
         {
           "target": "portable",
           "arch": [
