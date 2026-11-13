@@ -1,12 +1,29 @@
 # HYWmusic
 
-HYWmusic（何意味音乐）**桌面音乐播放器** · Windows / Electron。
+> **开发说明 / Development Note**
+>
+> 本项目的需求、架构、设计思路与关键决策均由作者独立完成。
+> AI 模型仅用于代码编写、调试排错与文案润色，不参与方案构思与功能取舍。
+> 涉及模型：[DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/)（API 模型名 `deepseek-flash`）、[腾讯混元 Hy4](https://hunyuan.tencent.com/research/hy4)。
+> 所有生成内容均由作者审阅、修改后合入；模型仅作开发辅助，不构成运行时依赖。
+>
+> All requirements, architecture, design ideas and key decisions in this project
+> were made by the author. AI models were used only for writing code, debugging
+> and polishing text — not for ideation or design choices.
+> Models used: [DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/) (API: `deepseek-flash`)
+> and [Tencent Hunyuan Hy4](https://hunyuan.tencent.com/research/hy4).
+> All generated output was reviewed and adapted by the author before merging.
+> These models are development aids, not runtime dependencies.
+
+![version](https://img.shields.io/badge/version-1.0.0--rc1-blue)
+![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
+![electron](https://img.shields.io/badge/Electron-33-47848F)
+![license](https://img.shields.io/badge/license-Apache--2.0-green)
+
+HYWmusic（何意味音乐）—— 一款 Windows 桌面音乐播放器，多音源聚合搜索，开箱即用，无需注册登录。
 
 界面参考 LX Music 的布局：左侧导航 + 顶部搜索 + 歌曲列表 + 底部播放控制栏 + 歌词面板。
-音源来自何意味音乐开放接口，**开箱即用，无需注册登录**。
-
-- **版本**：v1.0.0-rc1（2026-11-14）
-- **许可证**：[Apache License 2.0](./LICENSE)
+音源来自何意味音乐开放接口。
 
 ---
 
