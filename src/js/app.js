@@ -18,11 +18,12 @@
     view: 'search',
     query: '',
     platform: 'all',
-    engine: 'lx',
+    engine: 'default',
     quality: '320k',
     loading: false,
     results: [],
     resultMeta: '',
+    partial: false,
     error: '',
     themePref: 'auto',
     history: LS.get('hyw-history', []),
@@ -39,11 +40,14 @@
     showVolume: false,
     detailOpen: false,
     selected: new Set(),
-    version: '1.0.0-rc1',
+    version: '1.0.0',
     baseUrl: '',
     // 只保留展示别名，渲染进程内不落地真实服务端地址
     serverLabel: '',
     serverFull: '',
+    serverAuto: true,
+    serverLocal: false,
+    platformList: null, // 动态音源列表（服务端下发 / 本地引擎支持）
     serverIdx: 0,
     serverPresets: [],
     baseLabel: '',
@@ -172,7 +176,7 @@
   const PROBE_TTL = 10 * 60 * 1000;
   const PROBE_COUNT = 12;         // 每平台轮询取 2 条（6 源 ≈ 12 首），保证每个音源都参与
   const PROBE_CONCURRENCY = 6;    // 同时最多 6 个请求
-  const PROBE_TIMEOUT = 5000;     // 单条上限 5s：实测成功多在 1-7s，超时即视为暂不可播
+  const PROBE_TIMEOUT = 10000;    // 单条上限 10s：实测取链 1.2-7s，原 5s 会把能播的误判为不可播
 
   let searchToken = 0;            // 防止旧搜索的检测结果覆盖新搜索
 
@@ -210,16 +214,50 @@
     return out;
   }
 
-  /** 重排：保持「原唱 + 音质」顺序，仅把已确认播不了的移到末尾 */
+  /** 取某条结果实际可用的最高音质（优先实测，其次平台声明） */
+  function bestQualityOf(song) {
+    if (song && song.__probe && song.__probe.ok && song.__probe.quality) return song.__probe.quality;
+    const types = song && song._original && Array.isArray(song._original.types) ? song._original.types : [];
+    let best = '';
+    for (const t of types) {
+      if (qualityRank(t && t.type) > qualityRank(best)) best = (t && t.type) || '';
+    }
+    return best;
+  }
+
+  /** 音质徽章（列表列） */
+  function qualityBadge(song) {
+    const q = String(bestQualityOf(song) || '').toLowerCase();
+    if (!q) return '';
+    const hi = /flac|master|hires|atmos/.test(q);
+    const mid = q === '320k';
+    const label = hi ? 'FLAC' : q.toUpperCase();
+    return `<i class="qbadge ${hi ? 'q-hi' : mid ? 'q-mid' : 'q-low'}">${esc(label)}</i>`;
+  }
+
+  /** 是否「原唱命中」：标题（去括号）与关键词完全一致，且不含改编/现场等标记 */
+  function isOriginalHit(song, keyword) {
+    const kw = String(keyword || '').toLowerCase().replace(/\s+/g, '');
+    if (!kw) return false;
+    const name = String(song.name || '');
+    return normTitle(name) === kw && !NOISE_RE.test(name);
+  }
+
+  /**
+   * 重排：保持「原唱 + 音质」顺序，把确认播不了的移到末尾。
+   * 例外：原唱即使暂时取不到链也不移后——用户要的是先看到原唱，
+   * 点播时会自动换源（__alts）或跳过，而不是让它消失在列表底部。
+   */
   function rerankWithProbe(list, keyword) {
     const ranked = rankSongs(list, keyword);
-    const ok = [];
+    const keep = [];
     const dead = [];
     for (const song of ranked) {
-      if (song.__probe && song.__probe.ok === false) dead.push(song);
-      else ok.push(song);
+      const deadNow = song.__probe && song.__probe.ok === false;
+      if (deadNow && !isOriginalHit(song, keyword)) dead.push(song);
+      else keep.push(song);
     }
-    return ok.concat(dead);
+    return keep.concat(dead);
   }
 
   /** 按平台轮询取样：保证每个音源都有样本，而不是只测排在前面的同一个源 */
@@ -262,10 +300,18 @@
     const results = await mapLimit(targets, PROBE_CONCURRENCY, (song) => probeSong(song));
     if (token !== searchToken) return; // 搜索已变化，丢弃本次结果
     targets.forEach((song, i) => { song.__probe = results[i]; });
-    S.results = rerankWithProbe(S.results, keyword);
-    renderContent();
     const dead = results.filter((r) => r && r.ok === false).length;
     const plats = new Set(targets.map((x) => x.platform)).size;
+
+    // 大面积为「不可播」时先别重排：多半是网络/服务端瞬时波动，
+    // 照常重排会把本来能播的歌也压到列表底部，反而更糟。
+    if (dead / targets.length >= 0.6) {
+      toast(`检测到 ${dead}/${targets.length} 首暂不可播，可能是网络波动，已保留原顺序`, 'err');
+      return;
+    }
+
+    S.results = rerankWithProbe(S.results, keyword);
+    renderContent();
     toast(
       dead > 0
         ? `已检测 ${targets.length} 首（${plats} 个音源）：${dead} 首暂不可播，已移到后面`
@@ -498,9 +544,11 @@
         </div>
         <div class="topbar__filters">
           <label class="pick pick--sm" title="搜索引擎">
-            <select id="sel-engine">
-              <option value="lx"${S.engine === 'lx' ? ' selected' : ''}>LX 引擎</option>
-              <option value="api"${S.engine === 'api' ? ' selected' : ''}>聚合引擎</option>
+            <select id="sel-engine" title="${S.serverLocal ? '本地模式：BR 自研引擎（内置，本机直连音源）' : 'HYWmusic 线路：默认 / 自动'}">
+              ${S.serverLocal
+                ? `<option value="local" selected>BR 自研</option>`
+                : `<option value="default"${S.engine === 'default' ? ' selected' : ''}>默认</option>
+                   <option value="auto"${S.engine === 'auto' ? ' selected' : ''}>自动</option>`}
             </select>
           </label>
 
@@ -525,11 +573,14 @@
               ${icon('chevronDown', 14)}
             </button>
             ${S.sMenuOpen ? `<div class="dmenu dmenu--wide">
-              ${(S.serverPresets.length ? S.serverPresets : [{ name: '默认线路', label: '默认线路', def: true }]).map((p, i) => `
-                <button class="dmenu__i${i === S.serverIdx ? ' on' : ''}" data-spick="${i}">
-                  <span class="dmenu__t"><b>${esc(p.name || presetLabel(p))}</b><small>${esc(p.label || (p.def ? '默认线路' : '备用线路'))}</small></span>
-                  ${i === S.serverIdx ? icon('check', 14) : ''}
-                </button>`).join('')}
+              <button class="dmenu__i${S.serverAuto && !S.serverLocal ? ' on' : ''}" data-spick="auto">
+                <span class="dmenu__t"><b>HYWmusic（自动）</b><small>${esc(S.serverAuto && !S.serverLocal ? (S.serverFull || '已自动选择最快线路') : '自动选择响应最快的线路')}</small></span>
+                ${S.serverAuto && !S.serverLocal ? icon('check', 14) : ''}
+              </button>
+              <button class="dmenu__i${S.serverLocal ? ' on' : ''}" data-spick="local">
+                <span class="dmenu__t"><b>本地（Beta）</b><small>BR 自研引擎 · 内置在本机，直连音源，不经过服务器</small></span>
+                ${S.serverLocal ? icon('check', 14) : ''}
+              </button>
               <div class="dmenu__sep"></div>
               <button class="dmenu__i" data-act="server-custom">
                 <span class="dmenu__t"><b>自定义地址…</b><small>手动填写 API 地址</small></span>
@@ -571,12 +622,44 @@
   }
 
   /** 音源切换条（全部 / 网易云 / QQ音乐 / 酷狗 / 酷我 / 咪咕 / 汽水） */
+  /** 当前可用音源：优先用服务端下发 / 本地引擎支持的列表 */
+  function platformsNow() {
+    return (S.platformList && S.platformList.length) ? S.platformList : API.PLATFORMS;
+  }
+
   function platformBar() {
-    return `<div class="pbar-chips">${API.PLATFORMS.map((p) => `
+    return `<div class="pbar-chips">${platformsNow().map((p) => `
       <button class="chip${S.platform === p.id ? ' on' : ''}" data-plat="${esc(p.id)}"
               title="${esc(p.name)}">
         <i class="dot" style="background:${p.color}"></i>${esc(p.name)}
       </button>`).join('')}</div>`;
+  }
+
+  /**
+   * 拉取音源列表：
+   * - HYWmusic 线路 → 用服务端下发的（服务端支持哪些就显示哪些）
+   * - 本地（Beta）  → 用 BR 自研引擎支持的
+   */
+  async function refreshPlatforms() {
+    try {
+      const r = await API.platforms();
+      if (!r || !r.ok || !r.data) return;
+      const all = { id: 'all', name: '全部', short: 'ALL', color: '#8b93a7' };
+      const list = [all];
+      Object.keys(r.data).forEach((id) => {
+        const known = API.PLATFORMS.find((p) => p.id === id);
+        list.push({
+          id,
+          name: r.data[id] || (known && known.name) || id,
+          short: (known && known.short) || id.toUpperCase(),
+          color: (known && known.color) || '#8b93a7',
+        });
+      });
+      S.platformList = list;
+      // 当前选中的音源如果不在新列表里，回落到「全部」
+      if (!list.some((p) => p.id === S.platform)) S.platform = 'all';
+      render();
+    } catch (_) {}
   }
 
   function viewSearch() {
@@ -590,7 +673,7 @@
         <p class="ph-sub">内置 ${API.PLATFORMS.length - 1} 个音源：${API.PLATFORMS.filter((p) => p.id !== 'all').map((p) => p.name).join(' · ')}</p></div>`;
     }
     return bar + listHead() + `<div class="rows">${S.results.map((s, i) => row(s, i)).join('')}</div>
-      <div class="listfoot">共 ${S.results.length} 首${S.resultMeta ? ' · ' + esc(S.resultMeta) : ''}</div>`;
+      <div class="listfoot">${S.partial ? '<span class="more-spin"></span>正在加载更多…' : `共 ${S.results.length} 首`}${S.resultMeta ? ' · ' + esc(S.resultMeta) : ''}</div>`;
   }
 
   function viewRank() {
@@ -687,6 +770,7 @@
               <span class="c-singer">本地音乐</span>
               <span class="c-album">${esc(f.size || '')}</span>
               <span class="c-plat"><i style="background:#8b93a7"></i>本地</span>
+              <span class="c-q"></span>
               <span class="c-time">—</span>
               <span class="c-act"></span>
             </div>`).join('')}</div>`
@@ -719,6 +803,7 @@
         <span class="c-singer">歌手</span>
         <span class="c-album">专辑</span>
         <span class="c-plat">音源</span>
+        <span class="c-q">音质</span>
         <span class="c-time">${icon('clock', 13)}</span>
         <span class="c-act"></span>
       </div>`;
@@ -752,13 +837,14 @@
           <button class="row__play" data-act="play-row" data-idx="${i}" title="播放">${icon('play', 13)}</button>
         </span>
         <span class="c-title">
-          ${cover ? `<img class="cover" src="${esc(thumbUrl(cover, 120))}" loading="lazy" alt="" data-cover="1" decoding="async"/>`
+          ${cover ? `<img class="cover" src="${esc(thumbUrl(cover, 120))}" loading="lazy" alt="" data-cover="1" decoding="async" referrerpolicy="no-referrer"/>`
                   : `<span class="cover cover--ph">${icon('music', 15)}</span>`}
           <span class="tt"><b>${esc(s.name || '未知歌曲')}</b>${q ? `<em class="qtag">${esc(q)}</em>` : ''}</span>
         </span>
         <span class="c-singer" title="${esc(s.singer || '')}">${esc(s.singer || '未知歌手')}</span>
         <span class="c-album" title="${esc(s.album || '')}">${esc(s.album || '—')}</span>
         <span class="c-plat"><i style="background:${p.color}"></i>${esc(p.name)}</span>
+        <span class="c-q">${qualityBadge(s)}</span>
         <span class="c-time">${fmt(s.duration)}</span>
         <span class="c-act">
           <button class="ico${fav ? ' on' : ''}" data-act="fav" data-idx="${i}" title="${fav ? '取消收藏' : '收藏'}">
@@ -1096,7 +1182,7 @@
       <footer class="pbar" id="pbar">
         <div class="pbar__left">
           <div class="pbar__cover" data-act="open-detail" title="点击展开播放详情">
-            ${cover ? `<img src="${esc(thumbUrl(cover, 200))}" alt="" data-cover="1" decoding="async"/>` : icon('disc', 22)}
+            ${cover ? `<img src="${esc(thumbUrl(cover, 200))}" alt="" data-cover="1" decoding="async" referrerpolicy="no-referrer"/>` : icon('disc', 22)}
           </div>
           <div class="pbar__meta">
             <b id="pb-name" title="${c ? esc(c.name) : ''}">${c ? esc(c.name) : '未在播放'}</b>
@@ -1247,7 +1333,7 @@
     const cover = c ? coverOf(c) : '';
     const cv = $('#detail-cover');
     if (cv) {
-      cv.innerHTML = cover ? `<img src="${esc(cover)}" alt="" data-cover="1" decoding="async"/>` : icon('disc', 64);
+      cv.innerHTML = cover ? `<img src="${esc(cover)}" alt="" data-cover="1" decoding="async" referrerpolicy="no-referrer"/>` : icon('disc', 64);
       cv.classList.toggle('spin', P.playing);
     }
     const bg = $('#detail-bg');
@@ -1523,9 +1609,15 @@
   function bindImageFallback() {
     document.addEventListener('error', (e) => {
       const el = e.target;
-      if (el && el.tagName === 'IMG' && el.dataset && el.dataset.cover) {
-        el.style.visibility = 'hidden';
+      if (!el || el.tagName !== 'IMG' || !el.dataset || !el.dataset.cover) return;
+      // 第一次失败：很多 CDN 对带查询参数的地址会 403，去掉参数再试一次
+      if (!el.dataset.retried) {
+        el.dataset.retried = '1';
+        const bare = String(el.src || '').split('?')[0];
+        if (bare && bare !== el.src) { el.src = bare; return; }
       }
+      // 仍然失败：隐藏，露出底下的占位图标
+      el.style.visibility = 'hidden';
     }, true);
   }
 
@@ -1599,15 +1691,25 @@
     // 服务端下拉项：只按序号切换，渲染进程不持有真实地址
     const sp = e.target.closest('[data-spick]');
     if (sp) {
-      const i = Number(sp.dataset.spick) || 0;
-      const r = await API.setServer(i);
-      S.serverIdx = i;
-      const p2 = S.serverPresets[i];
-      S.serverLabel = (p2 && (p2.name || p2.label)) || presetLabel(p2);
+      const raw = sp.dataset.spick;
+      const r = raw === 'auto'
+        ? await API.setServer('auto')
+        : raw === 'local'
+        ? await API.setServer('local')
+        : await API.setServer(Number(raw) || 0);
+      S.serverAuto = raw === 'auto';
+      S.serverLocal = raw === 'local';
+      if (S.serverLocal) S.engine = 'local';
+      else if (S.engine === 'local') S.engine = 'default';
+      S.serverIdx = raw === 'auto' || raw === 'local' ? S.serverIdx : (Number(raw) || 0);
+      const p2 = S.serverPresets[S.serverIdx];
+      S.serverLabel = S.serverLocal ? '本地（Beta）' : (S.serverAuto ? 'HYWmusic（自动）' : ((p2 && (p2.name || p2.label)) || presetLabel(p2)));
       S.serverFull = (r && r.label) || S.serverLabel;
       S.sMenuOpen = false;
       toast('已切换到 ' + S.serverLabel);
       render();
+      // 线路变了，音源列表也要跟着变（服务端下发 / 本地引擎）
+      refreshPlatforms().catch(() => {});
       return;
     }
 
@@ -1697,6 +1799,8 @@
       S.sMenuOpen = false;
       toast('已切换到 ' + S.serverLabel);
       render();
+      // 线路变了，音源列表也要跟着变（服务端下发 / 本地引擎）
+      refreshPlatforms().catch(() => {});
       return;
     }
     if (act === 'server-test') {
@@ -1821,20 +1925,27 @@
      业务
      ============================================================ */
 
+  /**
+   * 搜索：两阶段加载。
+   * 阶段 1 用小 limit 快速出 10-20 条，让用户立刻看到东西（网络差时尤其重要）；
+   * 阶段 2 在后台补全到完整条数，到齐后替换列表。
+   */
   async function doSearch(playFirst, forceRefresh) {
     const kw = (S.query || '').trim();
     if (!kw) { toast('请输入搜索关键词'); return; }
 
     const limit = S.limit || 30;
+    const FIRST_LIMIT = 6; // 每平台 6 条，去重后通常 10-20 条
     const cacheKey = `${kw}|${S.platform}|${S.engine}|${limit}`;
 
-    S.view = 'search'; S.error = ''; S.results = [];
+    S.view = 'search'; S.error = ''; S.results = []; S.partial = false;
     const token = ++searchToken;
 
-    // 命中缓存：直接出结果，不再等网络
+    // 命中缓存：直接出完整结果，不再等网络
     if (!forceRefresh) {
       const hit = searchCache.get(cacheKey);
       if (hit && Date.now() - hit.t < SEARCH_TTL) {
+        if (token !== searchToken) return;
         S.loading = false;
         S.results = hit.data;
         S.resultMeta = hit.meta;
@@ -1847,23 +1958,94 @@
     S.loading = true;
     render();
 
+    // 阶段 1：先让界面有内容
+    let gotFirst = false;
     try {
-      const res = await API.search({ keyword: kw, platform: S.platform, mode: S.engine, limit });
+      const first = S.engine === 'local'
+        // BR 自研引擎在本机跑，1-2 秒就能出结果，直接小批量请求
+        ? await API.search({ keyword: kw, platform: S.platform, engine: S.engine, limit: FIRST_LIMIT })
+        // 服务端聚合慢（冷缓存 20s+），先并发打两个快平台，谁先回先显示
+        : await firstAvailable(kw, 14);
+
+      if (token !== searchToken) return;
+      if (first && first.ok && (first.data || []).length) {
+        S.results = rankSongs(first.data, kw);
+        S.resultMeta = metaOf(first);
+        S.loading = false;
+        S.partial = true;
+        renderContent();
+        gotFirst = true;
+        if (playFirst) playFrom(S.results, 0);
+        // 阶段 2 不 await：后台补全
+        loadFullSearch(kw, token, limit, cacheKey, false).catch(() => {});
+        return;
+      }
+    } catch (_) {
+      if (token !== searchToken) return;
+    }
+
+    // 阶段 1 没拿到（或异常）→ 直接走完整请求
+    if (!gotFirst) await loadFullSearch(kw, token, limit, cacheKey, true);
+  }
+
+  /**
+   * 并发请求两个响应最快的单平台，谁先返回就用谁先渲染。
+   * 服务端聚合接口冷缓存要 20s+，但单平台通常 3-5s，用户能更早看到结果。
+   */
+  function firstAvailable(kw, limit) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (res) => { if (!settled) { settled = true; resolve(res); } };
+      ['wy', 'tx'].forEach((p) => {
+        API.search({ keyword: kw, platform: p, engine: S.engine, limit })
+          .then((r) => { if (r && r.ok && (r.data || []).length) done(r); })
+          .catch(() => {});
+      });
+      // 8 秒还没人回来就放弃首批，交给完整请求
+      setTimeout(() => done(null), 8000);
+    });
+  }
+
+  function metaOf(res) {
+    if (!res) return '';
+    if (res.mode === 'local') return 'BR 自研引擎';
+    if (res.mode === 'api') return '聚合引擎';
+    return 'LX 引擎';
+  }
+
+  /** 完整搜索（阶段 2 或首次兜底） */
+  async function loadFullSearch(kw, token, limit, cacheKey, isPrimary) {
+    try {
+      const res = await API.search({ keyword: kw, platform: S.platform, engine: S.engine, limit });
+      if (token !== searchToken) return;
       if (res && res.ok) {
         const ranked = rankSongs(res.data || [], kw);
-        const meta = res.mode === 'api' ? '聚合引擎' : 'LX 引擎';
+        // 后台补全时，若条数没比首批多，就不打断当前列表
+        if (!isPrimary && ranked.length <= S.results.length) {
+          S.partial = false;
+          return;
+        }
         S.results = ranked;
-        S.resultMeta = meta;
-        // 写入缓存（超上限时淘汰最早的一条）
+        S.partial = false;
+        S.resultMeta = metaOf(res);
+        S.loading = false;
         if (searchCache.size >= SEARCH_CACHE_MAX) {
           const oldest = searchCache.keys().next().value;
           searchCache.delete(oldest);
         }
-        searchCache.set(cacheKey, { t: Date.now(), data: ranked, meta });
-      } else {
+        searchCache.set(cacheKey, { t: Date.now(), data: ranked, meta: S.resultMeta });
+        renderContent();
+        probeAndRerank(kw, token);
+        return;
+      }
+      if (isPrimary) {
         S.error = (res && res.error) || '搜索失败';
+        S.loading = false;
+        renderContent();
       }
     } catch (err) {
+      if (token !== searchToken) return;
+      if (!isPrimary) return;
       const msg = String((err && err.message) || err || '');
       const clean = msg.replace(/^Error invoking remote method '[^']+':\s*/, '');
       if (/超时|timeout/i.test(msg)) {
@@ -1873,15 +2055,9 @@
       } else {
         S.error = '搜索失败：' + (clean || '请稍后重试');
       }
-    } finally {
       S.loading = false;
+      renderContent();
     }
-
-    if (playFirst && S.results.length) { renderContent(); playFrom(S.results, 0); return; }
-    renderContent();
-
-    // 首屏已出，后台再探测可播性并微调顺序（不阻塞）
-    if (S.results.length) probeAndRerank(kw, token);
   }
 
   async function loadLyrics(song) {
@@ -2097,8 +2273,13 @@
       // 主进程已比对过本地配置，直接告知当前命中哪个预设（-1 = 自定义地址）
       S.serverIdx = typeof srv.index === 'number' ? srv.index : 0;
       const cur = S.serverPresets[S.serverIdx] || S.serverPresets[0];
-      // 顶栏只显示短名（如 hywmusic），完整别名放到 tooltip，避免下拉过宽
-      S.serverLabel = (cur && (cur.name || cur.label)) || srv.alias || '默认线路';
+      S.serverAuto = srv.auto !== false;
+      S.serverLocal = srv.local === true;
+      // 本地模式只能用自研引擎；HYWmusic 线路只能用默认/自动
+      if (S.serverLocal) S.engine = 'local';
+      else if (S.engine === 'local') S.engine = 'default';
+      // 自动模式只显示「自动」，具体命中哪条线路放到 tooltip
+      S.serverLabel = S.serverLocal ? '本地（Beta）' : (S.serverAuto ? 'HYWmusic（自动）' : ((cur && (cur.name || cur.label)) || srv.alias || '默认线路'));
       S.serverFull = srv.label || srv.alias || '';
     }
 
@@ -2128,6 +2309,9 @@
       const b = $('#boot');
       if (b) { b.classList.add('hide'); setTimeout(() => b.remove(), 400); }
     }, 150);
+
+    // 音源列表：由当前线路决定（服务端下发 / 本地引擎）
+    refreshPlatforms().catch(() => {});
 
     // 登录态不影响首屏，后台补（打开设置页时已有值）
     API.cardKeyStatus().then((k) => { S.cardKey = k || { active: false }; }).catch(() => {});

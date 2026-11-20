@@ -4,18 +4,17 @@
 >
 > 本项目的需求、架构、设计思路与关键决策均由作者独立完成。
 > AI 模型仅用于代码编写、调试排错与文案润色，不参与方案构思与功能取舍。
-> 涉及模型：[DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/)（API 模型名 `deepseek-flash`）、[腾讯混元 Hy4](https://hunyuan.tencent.com/research/hy4)。
+> 涉及模型：[DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/)（API 模型名 `deepseek-flash`）。
 > 所有生成内容均由作者审阅、修改后合入；模型仅作开发辅助，不构成运行时依赖。
 >
 > All requirements, architecture, design ideas and key decisions in this project
 > were made by the author. AI models were used only for writing code, debugging
 > and polishing text — not for ideation or design choices.
-> Models used: [DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/) (API: `deepseek-flash`)
-> and [Tencent Hunyuan Hy4](https://hunyuan.tencent.com/research/hy4).
+> Models used: [DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/) (API: `deepseek-flash`).
 > All generated output was reviewed and adapted by the author before merging.
 > These models are development aids, not runtime dependencies.
 
-![version](https://img.shields.io/badge/version-1.0.0--rc1-blue)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
 ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 ![electron](https://img.shields.io/badge/Electron-33-47848F)
 ![license](https://img.shields.io/badge/license-Apache--2.0-green)

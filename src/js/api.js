@@ -30,15 +30,13 @@
    * api  = 传给服务端的取值
    * tier = 皇冠等级 1..4，仅用于界面展示
    */
+  // 精简为 5 档：母带 / Hi-Res / 无损 / 高品 / 标准（原来的 32bit、24bit、超清并入「无损」）
   const QUALITIES = [
     { id: 'master', name: '母带', api: 'master', ext: 'flac', tier: 4, desc: '母带级 Master' },
-    { id: 'atmos', name: '超清', api: 'atmos', ext: 'flac', tier: 4, desc: '超清音质' },
-    { id: 'hires', name: 'Hi-Res音质', api: 'hires', ext: 'flac', tier: 3, desc: '高解析无损' },
-    { id: 'flac32bit', name: '无损音质 32bit', api: 'flac32bit', ext: 'flac', tier: 3, desc: 'FLAC 32bit' },
-    { id: 'flac24bit', name: '无损音质 24bit', api: 'flac24bit', ext: 'flac', tier: 3, desc: 'FLAC 24bit' },
-    { id: 'flac16bit', name: '无损音质', api: 'flac', ext: 'flac', tier: 3, desc: 'FLAC 16bit · CD 级' },
-    { id: '320k', name: '高品音质', api: '320k', ext: 'mp3', tier: 2, desc: '320kbps' },
-    { id: '128k', name: '标准音质', api: '128k', ext: 'mp3', tier: 1, desc: '128kbps' },
+    { id: 'hires', name: 'Hi-Res', api: 'hires', ext: 'flac', tier: 3, desc: '高解析无损' },
+    { id: 'flac16bit', name: '无损', api: 'flac', ext: 'flac', tier: 3, desc: 'FLAC · CD 级' },
+    { id: '320k', name: '高品', api: '320k', ext: 'mp3', tier: 2, desc: '320kbps' },
+    { id: '128k', name: '标准', api: '128k', ext: 'mp3', tier: 1, desc: '128kbps' },
   ];
 
   /**
@@ -50,7 +48,8 @@
    * 设置里的「优先播放的音质」只作为**排序参考**，不限制实际播放质量。
    * 服务端对拿不到的档位会自动回落，因此多数情况下一次即可命中。
    */
-  const QUALITY_CHAIN = ['master', 'atmos', 'hires', 'flac32bit', 'flac24bit', 'flac', '320k', '128k'];
+  // 注意：服务端不认 flac32bit（实测返回 400 不支持的音质），不要放进降级链
+  const QUALITY_CHAIN = ['master', 'atmos', 'hires', 'flac24bit', 'flac', '320k', '128k'];
 
   const QUALITY_FALLBACK = {
     master: QUALITY_CHAIN,
@@ -137,6 +136,7 @@
     lyrics: (params) => bridge.lyrics(params),
     playlist: (params) => bridge.playlist(params),
     config: () => bridge.config(),
+    platforms: () => bridge.platforms(),
     download: (params) => bridge.download(params),
   };
 })();

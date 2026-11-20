@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('hyw', {
   lyrics: (params) => ipcRenderer.invoke('music:lyrics', params),
   playlist: (params) => ipcRenderer.invoke('music:playlist', params),
   config: () => ipcRenderer.invoke('music:config'),
+  platforms: () => ipcRenderer.invoke('music:platforms'),
   download: (params) => ipcRenderer.invoke('music:download', params),
 
   /* 本地配置 */

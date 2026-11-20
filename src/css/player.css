@@ -295,7 +295,7 @@
 
 .listhead, .row {
   display: grid;
-  grid-template-columns: 46px minmax(160px, 2.4fr) minmax(100px, 1.1fr) minmax(90px, 1.3fr) 86px 56px 70px;
+  grid-template-columns: 46px minmax(160px, 2.4fr) minmax(100px, 1.1fr) minmax(90px, 1.3fr) 86px 58px 56px 70px;
   align-items: center;
   gap: 8px;
 }
@@ -405,6 +405,33 @@
   white-space: nowrap;
 }
 .c-plat i { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+
+/* 音质徽章：直观显示每条实际可用的最高音质，作为排序依据 */
+.c-q { display: inline-flex; align-items: center; }
+
+/* 分批加载提示：小转圈 + 文字，不打断列表 */
+.more-spin {
+  display: inline-block;
+  width: 11px; height: 11px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1.6px solid hsl(var(--muted-2) / .35);
+  border-top-color: hsl(var(--primary));
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+.qbadge {
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  letter-spacing: .3px;
+  font-style: normal;
+}
+.qbadge.q-hi  { color: #a9791c; background: rgba(212,175,55,.18); }
+.qbadge.q-mid { color: hsl(var(--primary)); background: hsl(var(--primary) / .13); }
+.qbadge.q-low { color: hsl(var(--muted-2)); background: hsl(var(--muted) / .14); }
 
 .c-time {
   font-size: 12px;
@@ -581,7 +608,7 @@
   padding: 0 18px;
   background: hsl(var(--bg-elev));
   border-top: 1px solid hsl(var(--border));
-  z-index: 60;
+  z-index: 500; /* 高于详情页(400)，任何页面都固定在底部可见 */
 }
 
 .pbar__left {
@@ -982,7 +1009,7 @@
 
 .detail {
   position: fixed;
-  inset: 0;
+  inset: 0 0 var(--pbar-h) 0; /* 底部让出播放栏 */
   z-index: 400;
   background: hsl(var(--bg));
   display: flex;
@@ -994,7 +1021,8 @@
 
 .detail__bg {
   position: absolute;
-  inset: 0;
+  top: 40px; /* 顶部 40px 留给窗口控件区，保持与 --bg 同色 */
+  left: 0; right: 0; bottom: 0;
   background-size: cover;
   background-position: center;
   filter: blur(60px) saturate(1.6);

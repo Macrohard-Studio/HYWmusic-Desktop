@@ -170,6 +170,32 @@
 
   const systemDark = () => window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
 
+  /** 读取已生效的 CSS 颜色变量（形如 "120 22% 96%"）并转成 #rrggbb */
+  function cssVarToHex(name) {
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      const m = v.match(/([-\d.]+)\s+([\d.]+)%\s+([\d.]+)%/);
+      if (!m) return null;
+      const h = (((+m[1]) % 360) + 360) % 360;
+      const sat = Math.max(0, Math.min(1, +m[2] / 100));
+      const lig = Math.max(0, Math.min(1, +m[3] / 100));
+      const c = (1 - Math.abs(2 * lig - 1)) * sat;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const base = lig - c / 2;
+      let r = 0, g = 0, b = 0;
+      if (h < 60) { r = c; g = x; }
+      else if (h < 120) { r = x; g = c; }
+      else if (h < 180) { g = c; b = x; }
+      else if (h < 240) { g = x; b = c; }
+      else if (h < 300) { r = x; b = c; }
+      else { r = c; b = x; }
+      const to = (n) => Math.round(Math.min(1, Math.max(0, n + base)) * 255).toString(16).padStart(2, '0');
+      return '#' + to(r) + to(g) + to(b);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /** 解析「跟随系统」到具体主题 id */
   function resolveId(pref) {
     if (pref === 'auto' || !pref) {
@@ -189,10 +215,14 @@
     for (const [k, v] of Object.entries(tokens)) root.style.setProperty(k, v);
     root.dataset.theme = theme.mode;
     root.dataset.themeId = theme.id;
-    // 同步原生标题栏配色（把主题背景色一并传过去，避免出现色块错位）
-    try { window.hyw && window.hyw.setTheme(theme.mode, merged.bg); } catch (_) {}
+    // 同步原生标题栏配色：取渲染后的 --bg 实际颜色（而非主题定义值），
+    // 保证右上角窗口按钮区域与页面背景完全一致
+    try {
+      const actualBg = cssVarToHex('--bg') || merged.bg;
+      window.hyw && window.hyw.setTheme(theme.mode, actualBg);
+    } catch (_) {}
     return theme;
   }
 
-  window.Theme = { THEMES, byId, apply, resolveId, buildTokens, systemDark };
+  window.Theme = { THEMES, byId, apply, resolveId, buildTokens, systemDark, cssVarToHex };
 })();

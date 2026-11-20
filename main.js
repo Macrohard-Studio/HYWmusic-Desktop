@@ -23,6 +23,7 @@ const {
   Tray,
   Menu,
 } = require('electron');
+const localEngine = require('./engine/local');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -104,14 +105,57 @@ const DEFAULT_BASE_URL = 'https://103.79.184.97';
 
 /** 服务端预设（可自行增删） */
 const SERVER_PRESETS = [
-  { name: 'HYWmusic', url: 'https://103.79.184.97', def: true },
+  // 备用线路设为默认：官方线路的 /api/music/proxy 目前严重变慢（60s 仅 113KB），
+  // 会导致「取链成功但播不出来」。等官方代理恢复后可把 def 改回去。
+  { name: 'HYWmusic 备用', url: 'https://23.254.145.153', def: true, alias: '何意味音乐 · 备用线路' },
+  { name: 'HYWmusic', url: 'https://103.79.184.97', alias: '何意味音乐 · 官方线路' },
 ];
+
+/*
+ * 自动选线：并发测各预设的 /music 响应时间，取最快的。
+ * 结果只影响「自动」模式；用户手动填了自定义地址时不参与。
+ */
+let autoBase = '';
+let autoLabel = '';
+let autoMs = 0;
+
+async function measureServer(url) {
+  const t = Date.now();
+  try {
+    await httpRequest(`${url}/music`, { timeout: 2500, raw: true });
+    return Date.now() - t;
+  } catch (_) {
+    return Infinity;
+  }
+}
+
+async function pickFastestServer() {
+  const list = await Promise.all(SERVER_PRESETS.map(async (p) => ({ p, ms: await measureServer(p.url) })));
+  list.sort((a, b) => a.ms - b.ms);
+  const best = list.find((x) => isFinite(x.ms));
+  if (!best) return null;
+  autoBase = best.p.url;
+  autoLabel = best.p.alias || best.p.name;
+  autoMs = best.ms;
+  logLine(`自动线路：${best.p.name}（${best.ms}ms）`);
+  return best.p;
+}
+
+/** 当前是否处于「自动」模式 */
+function isAutoMode() {
+  const u = String(readConfig().serverUrl || '').trim();
+  return !u || u === 'auto';
+}
 
 /** 服务端地址（可在客户端「服务器」下拉里改，存本地配置） */
 function currentBase() {
   let u = '';
   try { u = String(readConfig().serverUrl || '').trim(); } catch (_) {}
-  if (!u) u = DEFAULT_BASE_URL;
+  // 未配置时用「标记为 def 的预设」作为默认线路（而不是写死常量，
+  // 否则切换默认线路时不会生效）
+  if (!u || u === 'auto') {
+    u = autoBase || (SERVER_PRESETS.find((p) => p.def) || SERVER_PRESETS[0]).url;
+  }
   if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
   return u.replace(/\/+$/, '');
 }
@@ -271,6 +315,9 @@ const SERVER_ALIAS = '何意味音乐 · 官方线路';
 
 /** 从地址中提取一个不含 IP 的短标识；纯 IP 一律不显示 */
 function publicServerLabel(url) {
+  const key = String(url || '').replace(/\/+$/, '');
+  const preset = SERVER_PRESETS.find((p) => p.url.replace(/\/+$/, '') === key);
+  if (preset && preset.alias) return preset.alias;
   let host = '';
   try { host = new URL(url).hostname; } catch (_) { host = String(url || ''); }
   // 纯 IPv4 / IPv6 字面量：绝不外露，统一回落到别名
@@ -523,6 +570,12 @@ async function adminLogout() {
 
 /** 搜索歌曲：keyword 搜索，或 type=artistSongs 按歌手取歌 */
 async function musicSearch(params = {}) {
+  // BR 自研引擎：只有「本地（Beta）」模式才启用。
+  // HYWmusic 线路下即使渲染层传了 engine=local 也不走自研，一律用服务端下发的接口。
+  if (readConfig().serverMode === 'local') {
+    return localEngine.search(params);
+  }
+
   const q = new URLSearchParams();
   if (params.type === 'artistSongs') {
     q.set('type', 'artistSongs');
@@ -533,14 +586,23 @@ async function musicSearch(params = {}) {
   } else {
     q.set('keyword', params.keyword || '');
     q.set('platform', params.platform || 'all');
-    if (params.mode) q.set('mode', params.mode);
+    // 引擎：default -> lx；auto -> 先 lx 失败再 api；local 已在上面分流
+    q.set('mode', params.engine === 'api' ? 'api' : 'lx');
     if (params.limit) q.set('limit', String(params.limit));
     if (params.page) q.set('page', String(params.page));
   }
 
+  // default -> lx；auto -> 先 lx，失败再用 api
+  if (!q.get('mode')) q.set('mode', 'lx');
+
   // 服务端首次搜索（冷缓存）实测 18-26s，超时设 30s 留出余量，避免过早失败
-  const res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
-  const j = res.json;
+  let res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
+  let j = res.json;
+  if (params.engine === 'auto' && (!j || j.code !== 200 || !(j.data || []).length)) {
+    q.set('mode', 'api');
+    res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
+    j = res.json;
+  }
   if (j && j.code === 200) {
     return {
       ok: true,
@@ -559,6 +621,26 @@ async function musicSearch(params = {}) {
 
 /** 取播放地址 */
 async function musicUrl(params = {}) {
+  if (readConfig().serverMode === 'local') {
+    const local = await localEngine.url(params);
+    if (local && local.ok) return local;
+    // BR 自研引擎拿不到（多为平台要求登录态）→ 回落服务端，避免「点了播不了」
+    try {
+      const qs = new URLSearchParams({
+        source: params.platform || '',
+        songId: params.songId || '',
+        quality: params.quality || '320k',
+        name: params.name || '',
+        singer: params.singer || '',
+      });
+      const res = await httpRequest(`${currentBase()}/api/music/url?${qs.toString()}`, { timeout: 20000 });
+      const j = res.json;
+      if (j && j.url) {
+        return { ok: true, data: { url: j.url, actualQuality: j.actualQuality || '', fallback: 'server' } };
+      }
+    } catch (_) {}
+    return local;
+  }
   const q = new URLSearchParams({
     source: params.platform || '',
     songId: params.songId || '',
@@ -624,6 +706,23 @@ async function playlistParse(params = {}) {
 }
 
 /** 平台 / 音质等运行时配置 */
+/** 音源列表：HYWmusic 线路用服务端下发的；本地模式用 BR 自研引擎支持的 */
+async function musicPlatforms() {
+  if (String(readConfig().serverMode || '') === 'local') {
+    // 统一成 { id: 名称 } 结构，和服端下发格式一致
+    const data = {};
+    (localEngine.SUPPORTED || Object.keys(localEngine.PLATFORM_META)).forEach((id) => {
+      const meta = localEngine.PLATFORM_META[id];
+      if (meta) data[id] = meta.name;
+    });
+    return { ok: true, mode: 'local', data };
+  }
+  const res = await httpRequest(`${currentBase()}/api/music/config?type=platforms`, { timeout: 12000 });
+  const j = res.json;
+  if (j && j.code === 200 && j.data) return { ok: true, mode: 'server', data: j.data };
+  return { ok: false, error: (j && (j.error || j.message)) || '获取音源列表失败' };
+}
+
 async function musicConfig() {
   const res = await httpRequest(`${currentBase()}/api/music/config?type=all`, { timeout: 30000 });
   const j = res.json;
@@ -644,14 +743,22 @@ async function musicDownload(params = {}) {
   });
 
   const ses = session.fromPartition(PARTITION);
-  const res = await httpRequest(`${currentBase()}/api/music/download?${q.toString()}`, {
+  let res = await httpRequest(`${currentBase()}/api/music/download?${q.toString()}`, {
     ses,
     raw: true,
     timeout: 180000,
   });
 
-  if (res.status !== 200) {
-    let msg = `HTTP ${res.status}`;
+  // 服务端会把下载请求 302 跳到真实文件地址（CDN）。httpRequest 用 redirect:'manual'，
+  // 必须在这里手动跟随，否则会拿到空 body 并误报「HTTP 302」。
+  let hops = 0;
+  while (res && res.redirected && res.redirectUrl && hops < 3) {
+    hops += 1;
+    res = await httpRequest(res.redirectUrl, { ses, raw: true, timeout: 180000 });
+  }
+
+  if (!res || res.status !== 200) {
+    let msg = `HTTP ${(res && res.status) || '无响应'}`;
     try {
       const j = JSON.parse(res.text);
       msg = j.message || j.error || msg;
@@ -742,7 +849,8 @@ function createWindow() {
     const cfg = readConfig();
     if (cfg.closeAskDisabled) {
       if (cfg.closeAction === 'quit') {
-        isQuitting = true;
+        // 直接退出：不留下托盘/窗口/子进程
+        forceQuitNow('关闭时选择直接退出');
         return;
       }
       e.preventDefault();
@@ -996,10 +1104,12 @@ function createWindow() {
 function updateTitlebarOverlay(theme, bgColor) {
   if (!mainWindow) return;
   const dark = theme === 'dark';
+  const color = /^#[0-9a-f]{6}$/i.test(bgColor || '') ? bgColor : (dark ? '#14161a' : '#f2f3f7');
   try {
+    console.log('[hyw] 标题栏配色', theme, color, '(收到:', bgColor, ')');
     mainWindow.setTitleBarOverlay({
       // 跟随主题背景，避免出现与页面不一致的色块
-      color: /^#[0-9a-f]{6}$/i.test(bgColor || '') ? bgColor : (dark ? '#14161a' : '#f2f3f7'),
+      color,
       symbolColor: dark ? '#e8ecf5' : '#1a1d26',
       height: 40,
     });
@@ -1139,6 +1249,7 @@ function registerIpc() {
   ipcMain.handle('music:lyrics', (_e, params) => musicLyrics(params));
   ipcMain.handle('music:playlist', (_e, params) => playlistParse(params));
   ipcMain.handle('music:config', () => musicConfig());
+  ipcMain.handle('music:platforms', () => musicPlatforms());
   ipcMain.handle('music:download', (_e, params) => musicDownload(params));
 
   ipcMain.handle('store:get', () => readConfig());
@@ -1153,7 +1264,7 @@ function registerIpc() {
       volume: 0.8,
       rate: 1,
       limit: 60,
-      serverUrl: DEFAULT_BASE_URL,
+      serverUrl: (SERVER_PRESETS.find((p) => p.def) || SERVER_PRESETS[0]).url,
       cardKey: '',
       cardKeyInfo: null,
       adminUser: '',
@@ -1168,9 +1279,15 @@ function registerIpc() {
     const cur = currentBase();
     // 在主进程内比对，直接把"命中哪个预设"告诉渲染进程，避免地址外传
     const idx = SERVER_PRESETS.findIndex((p) => p.url.replace(/\/+$/, '') === cur);
+    const curPreset = idx >= 0 ? SERVER_PRESETS[idx] : null;
+    const auto = isAutoMode();
     return {
-      label: publicServerLabel(cur),
+      label: (curPreset && curPreset.alias) || publicServerLabel(cur),
       alias: SERVER_ALIAS,
+      auto,
+      local: String(readConfig().serverMode || '') === 'local',
+      autoMs,
+      autoName: (curPreset && curPreset.name) || '',
       index: idx, // -1 表示自定义地址
       preset: SERVER_PRESETS.map((p) => ({
         name: p.name,
@@ -1183,11 +1300,24 @@ function registerIpc() {
     // 进度：数字 = 预设下标（渲染进程只需传序号）；
     //       字符串 = 自定义地址（仅"自定义地址…"这一条路径会传真实 URL）。
     let u;
+    if (target === 'local') {
+      writeConfig({ serverMode: 'local' });
+      logLine('已切换到本地引擎（Beta）');
+      return { ok: true, label: '本地（Beta）', local: true };
+    }
+    if (target === 'auto') {
+      writeConfig({ serverUrl: '', serverMode: 'auto' });
+      if (!autoBase) pickFastestServer().catch(() => {});
+      logLine('服务端已切换为自动选线');
+      return { ok: true, label: publicServerLabel(currentBase()), auto: true };
+    }
     if (typeof target === 'number' && SERVER_PRESETS[target]) {
       u = SERVER_PRESETS[target].url;
     } else {
       u = String(target || '').trim();
-      if (!u) u = DEFAULT_BASE_URL;
+      if (!u || u === 'auto') {
+    u = autoBase || (SERVER_PRESETS.find((p) => p.def) || SERVER_PRESETS[0]).url;
+  }
       if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
     }
     u = u.replace(/\/+$/, '');
@@ -1293,6 +1423,30 @@ app.on('child-process-gone', (_event, details) => {
   if (details.type !== 'GPU') logLine('子进程异常：' + JSON.stringify(details));
 });
 
+/**
+ * 彻底退出：销毁托盘、关闭所有窗口，并兜底强制结束。
+ * 用户选「直接退出」时必须走这里，避免主进程残留（托盘/子进程把应用吊住）。
+ */
+function forceQuitNow(reason) {
+  if (isQuitting) return;
+  isQuitting = true;
+  logLine('强制退出：' + (reason || ''));
+  try { destroyTray(); } catch (_) {}
+  try {
+    BrowserWindow.getAllWindows().forEach((w) => {
+      w.removeAllListeners('close');
+      w.destroy();
+    });
+  } catch (_) {}
+  try { app.quit(); } catch (_) {}
+  // 兜底：900ms 内没退干净就硬结束，保证不留进程
+  setTimeout(() => {
+    try { app.exit(0); } catch (_) {
+      try { process.exit(0); } catch (_) {}
+    }
+  }, 900);
+}
+
 app.on('before-quit', () => {
   // 用户主动退出（托盘菜单 / 关闭时选择直接退出 / Cmd+Q）
   isQuitting = true;
@@ -1300,12 +1454,37 @@ app.on('before-quit', () => {
   destroyTray();
 });
 
+/*
+ * 证书：预设线路可能用纯 IP + 自签名证书部署。
+ * 主进程的 httpRequest 已用 rejectUnauthorized:false，但 <audio> 走 Chromium 网络栈，
+ * 必须在这里放行，否则备用线路的歌能取到链却播不出声。
+ * 只对 SERVER_PRESETS 里的地址放行，其他站点仍严格校验。
+ */
+app.on('certificate-error', (event, _wc, url, _err, _cert, callback) => {
+  const ok = SERVER_PRESETS.some((p) => String(url || '').startsWith(p.url.replace(/\/+$/, '')));
+  if (ok) {
+    event.preventDefault();
+    callback(true);
+  } else {
+    callback(false);
+  }
+});
+
 // 退出时清理无关缓存（部分文件可能仍被占用，失败忽略，下次启动会再清）
 app.on('will-quit', () => {
   cleanCaches('退出');
+  try { destroyTray(); } catch (_) {}
+  // 兜底：1.2s 后仍未结束就强制结束进程
+  setTimeout(() => {
+    try { app.exit(0); } catch (_) {
+      try { process.exit(0); } catch (_) {}
+    }
+  }, 1200);
 });
 
 app.whenReady().then(() => {
+  // 自动选线：后台测速，不阻塞窗口显示
+  pickFastestServer().catch(() => {});
   // 站点使用 IP + HTTPS，证书链可能不完整：仅对本站放行
   app.on('certificate-error', (event, _wc, url, _error, _cert, callback) => {
     try {
