@@ -40,7 +40,7 @@
     showVolume: false,
     detailOpen: false,
     selected: new Set(),
-    version: '1.0.0',
+    version: '2.0.0-beta2',
     baseUrl: '',
     // 只保留展示别名，渲染进程内不落地真实服务端地址
     serverLabel: '',
@@ -544,11 +544,10 @@
         </div>
         <div class="topbar__filters">
           <label class="pick pick--sm" title="搜索引擎">
-            <select id="sel-engine" title="${S.serverLocal ? '本地模式：BR 自研引擎（内置，本机直连音源）' : 'HYWmusic 线路：默认 / 自动'}">
+            <select id="sel-engine" title="${S.serverLocal ? '本地模式：BR 自研引擎（内置，本机直连音源）' : 'HYWmusic 线路：LX + 聚合双引擎同时搜索'}">
               ${S.serverLocal
                 ? `<option value="local" selected>BR 自研</option>`
-                : `<option value="default"${S.engine === 'default' ? ' selected' : ''}>默认</option>
-                   <option value="auto"${S.engine === 'auto' ? ' selected' : ''}>自动</option>`}
+                : `<option value="default" selected>双引擎</option>`}
             </select>
           </label>
 
@@ -668,8 +667,14 @@
         <p class="ph-sub">首次搜索服务端需建立缓存，可能稍慢；再次搜索会很快</p></div>`;
     if (S.error) return bar + `<div class="placeholder">${icon('wifiOff', 34)}<p>${esc(S.error)}</p><button class="btn" data-act="retry-search">重试</button></div>`;
     if (!S.results.length) {
+      const pname = API.platformOf(S.platform).name;
+      const msg = !S.query
+        ? '输入关键词，开始搜索音乐'
+        : (S.platform === 'all'
+          ? '没有找到相关歌曲，试试换个关键词'
+          : `${pname} 暂无结果，换一个音源或关键词试试`);
       return bar + `<div class="placeholder">${icon('headphones', 42)}
-        <p>${S.query ? '没有找到相关歌曲，试试切换音源或引擎' : '输入关键词，开始搜索音乐'}</p>
+        <p>${esc(msg)}</p>
         <p class="ph-sub">内置 ${API.PLATFORMS.length - 1} 个音源：${API.PLATFORMS.filter((p) => p.id !== 'all').map((p) => p.name).join(' · ')}</p></div>`;
     }
     return bar + listHead() + `<div class="rows">${S.results.map((s, i) => row(s, i)).join('')}</div>
@@ -972,8 +977,7 @@
             </select></div>
           <div class="field"><label>搜索引擎</label>
             <select id="set-engine">
-              <option value="lx"${S.engine === 'lx' ? ' selected' : ''}>LX 引擎（准确率高）</option>
-              <option value="api"${S.engine === 'api' ? ' selected' : ''}>聚合引擎（响应更快）</option>
+              <option value="default" selected>双引擎（LX + 聚合并发同时搜索）</option>
             </select></div>
           <div class="field"><label>搜索结果数量</label>
             <select id="set-limit">
@@ -1212,6 +1216,7 @@
           <button class="ico" data-act="volume-panel" title="音量面板">
             ${icon(P.state.muted ? 'volumeMute' : 'volume', 17)}</button>
           <button class="ico${S.lyricsOpen ? ' on' : ''}" data-act="toggle-lyrics" title="歌词（Ctrl+L）">${icon('mic', 17)}</button>
+          <button class="ico${S.showQueue ? ' on' : ''}" data-act="toggle-queue" title="播放队列">${icon('listMusic', 17)}</button>
         </div>
       </footer>`;
   }
@@ -1700,7 +1705,7 @@
       S.serverAuto = raw === 'auto';
       S.serverLocal = raw === 'local';
       if (S.serverLocal) S.engine = 'local';
-      else if (S.engine === 'local') S.engine = 'default';
+      else S.engine = 'default';
       S.serverIdx = raw === 'auto' || raw === 'local' ? S.serverIdx : (Number(raw) || 0);
       const p2 = S.serverPresets[S.serverIdx];
       S.serverLabel = S.serverLocal ? '本地（Beta）' : (S.serverAuto ? 'HYWmusic（自动）' : ((p2 && (p2.name || p2.label)) || presetLabel(p2)));
@@ -1730,7 +1735,22 @@
     if (act === 'do-search') return doSearch();
     // 错误页的「重试」：强制绕过缓存重新请求
     if (act === 'retry-search') return doSearch(false, true);
-    if (act === 'clear-q') { S.query = ''; renderContent(); return; }
+    if (act === 'clear-q') {
+      // 只 renderContent 不会重绘顶栏，输入框里的文字和 ✕ 都还在 → 看起来"按了没用"。
+      // 这里必须整壳重绘，并 ++searchToken 作废在途请求，否则旧搜索回来又把列表填满。
+      S.query = '';
+      S.results = [];
+      S.error = '';
+      S.loading = false;
+      S.partial = false;
+      S.resultMeta = '';
+      S.view = 'search';
+      ++searchToken;
+      render();
+      const inp = $('#q');
+      if (inp) { inp.value = ''; inp.focus(); }
+      return;
+    }
 
     if (act === 'play-row') { playFrom(actEl.dataset.q ? P.state.queue : list, idx); return; }
     if (act === 'play-all') { if (list.length) playFrom(list, 0); return; }
@@ -1968,6 +1988,15 @@
         : await firstAvailable(kw, 14);
 
       if (token !== searchToken) return;
+      if (first && first.ok && !(first.data || []).length && S.platform !== 'all') {
+        // 单音源明确返回空：先立刻显示「暂无结果」，别让转圈卡十几秒；
+        // 完整请求继续在后台跑，若其实有结果再替换（现在是无条件替换）。
+        S.loading = false;
+        S.partial = true;
+        renderContent();
+        loadFullSearch(kw, token, limit, cacheKey, false).catch(() => {});
+        return;
+      }
       if (first && first.ok && (first.data || []).length) {
         S.results = rankSongs(first.data, kw);
         S.resultMeta = metaOf(first);
@@ -1989,16 +2018,26 @@
   }
 
   /**
-   * 并发请求两个响应最快的单平台，谁先返回就用谁先渲染。
-   * 服务端聚合接口冷缓存要 20s+，但单平台通常 3-5s，用户能更早看到结果。
+   * 并发请求首批结果。
+   * 关键：必须按当前音源取样 —— 原来写死 ['wy','tx']，
+   * 切到酷狗后会先把网易云/QQ 的结果塞进列表（表现为"旧结果滞留"），
+   * 等第二阶段回来才被替换；若第二阶段条数更少还会被早退逻辑保留下来。
    */
   function firstAvailable(kw, limit) {
+    const plats = S.platform && S.platform !== 'all' ? [S.platform] : ['wy', 'tx'];
+    // 单音源时：服务端一旦正常返回（哪怕是空列表）就没必要再等 8 秒，
+    // 否则「酷狗暂无结果」这种空结果会让界面白转 8 秒。
+    const single = plats.length === 1;
     return new Promise((resolve) => {
       let settled = false;
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
-      ['wy', 'tx'].forEach((p) => {
+      plats.forEach((p) => {
         API.search({ keyword: kw, platform: p, engine: S.engine, limit })
-          .then((r) => { if (r && r.ok && (r.data || []).length) done(r); })
+          .then((r) => {
+            if (!r) return;
+            if (single) { if (r.ok) done(r); return; }
+            if (r.ok && (r.data || []).length) done(r);
+          })
           .catch(() => {});
       });
       // 8 秒还没人回来就放弃首批，交给完整请求
@@ -2009,6 +2048,10 @@
   function metaOf(res) {
     if (!res) return '';
     if (res.mode === 'local') return 'BR 自研引擎';
+    if (res.mode === 'default') {
+      const list = (res.engines || []).map((m) => (m === 'api' ? '聚合' : 'LX'));
+      return list.length === 2 ? '双引擎（LX + 聚合）' : `${list[0] || 'LX'} 引擎`;
+    }
     if (res.mode === 'api') return '聚合引擎';
     return 'LX 引擎';
   }
@@ -2020,11 +2063,9 @@
       if (token !== searchToken) return;
       if (res && res.ok) {
         const ranked = rankSongs(res.data || [], kw);
-        // 后台补全时，若条数没比首批多，就不打断当前列表
-        if (!isPrimary && ranked.length <= S.results.length) {
-          S.partial = false;
-          return;
-        }
+        // 完整结果是当前「关键词+音源+引擎」的权威结果，无条件替换。
+        // 原来有「新结果没比首批多就不替换」的早退，会让首批的其它音源结果
+        // 一直滞留在列表里（切音源后尤其明显），已移除。
         S.results = ranked;
         S.partial = false;
         S.resultMeta = metaOf(res);
@@ -2275,9 +2316,10 @@
       const cur = S.serverPresets[S.serverIdx] || S.serverPresets[0];
       S.serverAuto = srv.auto !== false;
       S.serverLocal = srv.local === true;
-      // 本地模式只能用自研引擎；HYWmusic 线路只能用默认/自动
+      // 本地模式只能用自研引擎；HYWmusic 线路统一走「双引擎」
+      // （lx 与 api 并发同时搜；旧配置里的 lx / api / auto 一并迁移过来）
       if (S.serverLocal) S.engine = 'local';
-      else if (S.engine === 'local') S.engine = 'default';
+      else S.engine = 'default';
       // 自动模式只显示「自动」，具体命中哪条线路放到 tooltip
       S.serverLabel = S.serverLocal ? '本地（Beta）' : (S.serverAuto ? 'HYWmusic（自动）' : ((cur && (cur.name || cur.label)) || srv.alias || '默认线路'));
       S.serverFull = srv.label || srv.alias || '';

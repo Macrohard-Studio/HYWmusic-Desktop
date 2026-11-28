@@ -1,27 +1,13 @@
 # HYWmusic
 
-> **开发说明 / Development Note**
->
-> 本项目的需求、架构、设计思路与关键决策均由作者独立完成。
-> AI 模型仅用于代码编写、调试排错与文案润色，不参与方案构思与功能取舍。
-> 涉及模型：[DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/)（API 模型名 `deepseek-flash`）。
-> 所有生成内容均由作者审阅、修改后合入；模型仅作开发辅助，不构成运行时依赖。
->
-> All requirements, architecture, design ideas and key decisions in this project
-> were made by the author. AI models were used only for writing code, debugging
-> and polishing text — not for ideation or design choices.
-> Models used: [DeepSeek V4.1 Flash](https://www.deepseek.com/zh/news/deepseek-v4-1-flash/) (API: `deepseek-flash`).
-> All generated output was reviewed and adapted by the author before merging.
-> These models are development aids, not runtime dependencies.
-
-![version](https://img.shields.io/badge/version-1.0.0-blue)
+![version](https://img.shields.io/badge/version-2.0.0--beta2-blue)
 ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 ![electron](https://img.shields.io/badge/Electron-33-47848F)
 ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 HYWmusic（何意味音乐）—— 一款 Windows 桌面音乐播放器，多音源聚合搜索，开箱即用，无需注册登录。
 
-**v1.0.0**（2026-11-21）· [Apache License 2.0](./LICENSE) · 单文件便携版，双击即用
+**v2.0.0-beta2**（2026-11-28）· [Apache License 2.0](./LICENSE) · 单文件便携版，双击即用
 
 界面参考 LX Music 的布局：左侧导航 + 顶部搜索 + 歌曲列表 + 底部播放控制栏 + 歌词面板。
 音源默认走何意味音乐开放接口；也可以切到「本地（Beta）」使用内置的 **BR 自研引擎**，直接在本机请求音源、不经过服务器。
@@ -36,7 +22,7 @@ HYWmusic（何意味音乐）—— 一款 Windows 桌面音乐播放器，多�
 |---|---|
 | 多平台搜索 | 网易云 / QQ音乐 / 酷狗 / 酷我 / 咪咕 / 汽水，可「全部」聚合 |
 | 音源随线路 | **HYWmusic 线路**用服务端下发的音源列表；**本地（Beta）**用引擎实际支持的列表 |
-| 三档引擎 | **默认**（服务端 LX）/ **自动**（LX 失败自动转聚合）/ **BR 自研**（内置引擎，仅本地模式可用） |
+| 双引擎 | **默认**：LX 与聚合并发同时搜索，结果合并去重；**BR 自研**（内置引擎，仅本地模式可用） |
 | 两阶段加载 | 先并发打两个快平台，**约 2 秒出首批 10-20 条**，后台再补全到完整结果 |
 | 音质选择 | 母带 / Hi-Res / 无损 / 高品 / 标准 五档，播放中切换会重新取链 |
 | 取链优先最高档 | 播放时从母带往下逐级降，拿到什么用什么 |
@@ -77,7 +63,7 @@ HYWmusic（何意味音乐）—— 一款 Windows 桌面音乐播放器，多�
 
 | 线路 | 引擎 | 音源列表 | 数据通道 |
 |---|---|---|---|
-| **HYWmusic（自动）** | 默认 / 自动 | 服务端下发 | 何意味音乐开放接口 |
+| **HYWmusic（自动）** | 双引擎（LX + 聚合） | 服务端下发 | 何意味音乐开放接口 |
 | **本地（Beta）** | BR 自研（唯一） | 引擎实际支持的平台 | 本机直连各平台 |
 
 **线路自动选优**：启动时并发测两条线路的响应时间，自动用最快的那条，不需要手动挑。

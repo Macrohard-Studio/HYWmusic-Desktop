@@ -103,6 +103,15 @@ cleanCaches('启动');
 
 const DEFAULT_BASE_URL = 'https://103.79.184.97';
 
+/**
+ * 应用版本：以 package.json 为准。
+ * 直接跑 `electron main.js` 时 app.getVersion() 会回落成 Electron 版本号
+ * （实测返回 33.4.11），必须显式读取，否则开发态「关于」页版本是错的。
+ */
+const APP_VERSION = (() => {
+  try { return require('./package.json').version; } catch (_) { return app.getVersion(); }
+})();
+
 /** 服务端预设（可自行增删） */
 const SERVER_PRESETS = [
   // 备用线路设为默认：官方线路的 /api/music/proxy 目前严重变慢（60s 仅 113KB），
@@ -568,14 +577,8 @@ async function adminLogout() {
 /* 音乐接口（何意味音乐 /api/music/*）                                  */
 /* ------------------------------------------------------------------ */
 
-/** 搜索歌曲：keyword 搜索，或 type=artistSongs 按歌手取歌 */
-async function musicSearch(params = {}) {
-  // BR 自研引擎：只有「本地（Beta）」模式才启用。
-  // HYWmusic 线路下即使渲染层传了 engine=local 也不走自研，一律用服务端下发的接口。
-  if (readConfig().serverMode === 'local') {
-    return localEngine.search(params);
-  }
-
+/** 构造搜索查询串（artistSongs / 关键词通用） */
+function buildSearchQuery(params, mode) {
   const q = new URLSearchParams();
   if (params.type === 'artistSongs') {
     q.set('type', 'artistSongs');
@@ -586,29 +589,25 @@ async function musicSearch(params = {}) {
   } else {
     q.set('keyword', params.keyword || '');
     q.set('platform', params.platform || 'all');
-    // 引擎：default -> lx；auto -> 先 lx 失败再 api；local 已在上面分流
-    q.set('mode', params.engine === 'api' ? 'api' : 'lx');
+    if (mode) q.set('mode', mode);
     if (params.limit) q.set('limit', String(params.limit));
     if (params.page) q.set('page', String(params.page));
   }
+  return q;
+}
 
-  // default -> lx；auto -> 先 lx，失败再用 api
-  if (!q.get('mode')) q.set('mode', 'lx');
-
+/** 单引擎搜索（lx 或 api），返回统一结构 */
+async function searchOnce(params, mode) {
+  const q = buildSearchQuery(params, mode);
   // 服务端首次搜索（冷缓存）实测 18-26s，超时设 30s 留出余量，避免过早失败
-  let res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
-  let j = res.json;
-  if (params.engine === 'auto' && (!j || j.code !== 200 || !(j.data || []).length)) {
-    q.set('mode', 'api');
-    res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
-    j = res.json;
-  }
+  const res = await httpRequest(`${currentBase()}/api/music/search?${q.toString()}`, { timeout: 30000 });
+  const j = res.json;
   if (j && j.code === 200) {
     return {
       ok: true,
       data: j.data || [],
       total: j.total || (j.data ? j.data.length : 0),
-      mode: j.mode || 'lx',
+      mode: j.mode || mode,
       fallbackSource: j.fallbackSource || null,
     };
   }
@@ -617,6 +616,87 @@ async function musicSearch(params = {}) {
     status: res.status,
     error: (j && (j.message || j.error)) || `HTTP ${res.status}`,
   };
+}
+
+/** 合并两个引擎的结果：按 平台+songId 去重，缺失字段互相补全 */
+function mergeSearchResults(groups) {
+  const seen = new Map();
+  const out = [];
+  for (const { mode, res } of groups) {
+    for (const song of (res.data || [])) {
+      const key = song.songId
+        ? `${song.platform}|${song.songId}`
+        : `${song.platform}|${String(song.name || '').toLowerCase()}|${String(song.singer || '').toLowerCase()}`;
+      const hit = seen.get(key);
+      if (!hit) {
+        const copy = Object.assign({}, song);
+        copy.__engine = mode;
+        seen.set(key, copy);
+        out.push(copy);
+        continue;
+      }
+      // 已存在：补齐对方有的字段（封面、音质标记等）
+      if (!hit.picUrl && song.picUrl) hit.picUrl = song.picUrl;
+      if (!hit.album && song.album) hit.album = song.album;
+      if (!hit._original && song._original) hit._original = song._original;
+      if (!hit.duration && song.duration) hit.duration = song.duration;
+      hit.__engines = hit.__engines || [hit.__engine];
+      if (!hit.__engines.includes(mode)) hit.__engines.push(mode);
+    }
+  }
+  return out;
+}
+
+/**
+ * 双引擎并发搜索（默认）。
+ * lx 与 api 同时发出、互不等待，各自返回后合并去重 —— 任何一个先到都不会
+ * 让另一个被跳过，最终列表是两个引擎的并集。
+ */
+async function dualSearch(params) {
+  const settled = await Promise.all(
+    ['lx', 'api'].map((mode) =>
+      searchOnce(params, mode)
+        .then((res) => ({ mode, res }))
+        .catch((err) => ({ mode, res: { ok: false, error: (err && err.message) || '请求失败' } }))
+    )
+  );
+
+  const okOnes = settled.filter((x) => x.res && x.res.ok);
+  if (!okOnes.length) {
+    const first = settled[0] || {};
+    return {
+      ok: false,
+      status: first.res && first.res.status,
+      error: (first.res && first.res.error) || '搜索失败',
+    };
+  }
+
+  const data = mergeSearchResults(okOnes);
+  return {
+    ok: true,
+    data,
+    total: data.length,
+    mode: 'default',
+    engines: okOnes.map((x) => x.mode),
+    // 两个都失败才叫失败；这里只要有一个成功就正常返回
+    fallbackSource: okOnes[0].res.fallbackSource || null,
+  };
+}
+
+/** 搜索歌曲：keyword 搜索，或 type=artistSongs 按歌手取歌 */
+async function musicSearch(params = {}) {
+  // BR 自研引擎：只有「本地（Beta）」模式才启用。
+  // HYWmusic 线路下即使渲染层传了 engine=local 也不走自研，一律用服务端下发的接口。
+  if (readConfig().serverMode === 'local') {
+    return localEngine.search(params);
+  }
+
+  // 引擎三档收敛为两档：default（默认，lx + api 同时搜）、api / lx（仅设置页保留的强制单引擎）
+  const engine = params.engine || 'default';
+  if (engine === 'default' && params.type !== 'artistSongs') return dualSearch(params);
+
+  const mode = engine === 'api' ? 'api' : 'lx';
+  return searchOnce(params, mode);
 }
 
 /** 取播放地址 */
@@ -1259,7 +1339,7 @@ function registerIpc() {
       themePref: 'auto',
       quality: '320k',
       platform: 'all',
-      engine: 'lx',
+      engine: 'default',
       playMode: 'list',
       volume: 0.8,
       rate: 1,
@@ -1376,7 +1456,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('app:info', () => ({
-    version: app.getVersion(),
+    version: APP_VERSION,
     // 只给展示别名，真实地址不出主进程（关于页同样不泄露）
     baseLabel: publicServerLabel(currentBase()),
     partition: PARTITION,
@@ -1507,7 +1587,7 @@ app.whenReady().then(() => {
   registerIpc();
   watchForGpuFailure();
   createTray();
-  logLine(`启动 v${app.getVersion()} | 安全模式=${SAFE_MODE ? '开' : '关'} | Electron=${process.versions.electron}`);
+  logLine(`启动 v${APP_VERSION} | 安全模式=${SAFE_MODE ? '开' : '关'} | Electron=${process.versions.electron}`);
   createWindow();
 
   app.on('activate', () => {
